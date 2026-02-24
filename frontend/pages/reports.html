@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Reports - D&amp;M Sales</title>
+    <link rel="stylesheet" href="/css/bootstrap.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" crossorigin="anonymous" />
+    <link rel="stylesheet" href="../css/dashboard.css" />
+  </head>
+  <body data-page="reports" class="page-loading">
+    <div id="app-nav"></div>
+    <script src="../js/nav-inline.js"></script>
+
+    <main class="app-main container py-4">
+      <div class="mb-3">
+        <h1 class="h4 mb-1">Reports &amp; Analytics</h1>
+        <p class="text-muted small mb-0">
+          Export and review sales, payments, and inventory performance.
+        </p>
+      </div>
+
+      <div class="row g-3">
+        <div class="col-12 col-md-6 col-lg-4">
+          <div class="card border-0 shadow-sm">
+            <div class="card-body">
+              <h2 class="h6">Daily Sales Report</h2>
+              <p class="text-muted small mb-3">
+                Summary of sales and payments for a selected day.
+              </p>
+              <button class="btn btn-outline-primary btn-sm">
+                Generate report
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-12 col-md-6 col-lg-4">
+          <div class="card border-0 shadow-sm">
+            <div class="card-body">
+              <h2 class="h6">Customer Balances</h2>
+              <p class="text-muted small mb-3">
+                Outstanding balances across customers with unpaid invoices.
+              </p>
+              <button class="btn btn-outline-primary btn-sm">
+                View balances
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-12 col-md-6 col-lg-4">
+          <div class="card border-0 shadow-sm">
+            <div class="card-body">
+              <h2 class="h6">Top Products</h2>
+              <p class="text-muted small mb-3">
+                Best-selling items over a selected date range.
+              </p>
+              <button class="btn btn-outline-primary btn-sm">
+                View top products
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <script src="/js/bootstrap.bundle.min.js"></script>
+    <script src="/js/app-navigation.js"></script>
+    <script src="/js/modal-draggable.js"></script>
+    <script src="../js/dashboard.js" type="module"></script>
+  </body>
+</html>
+

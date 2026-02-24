@@ -1,0 +1,164 @@
+/**
+ * Electron main process.
+ * Sets SQLite DB path to userData, starts the Express backend, then opens the app window.
+ */
+import { app as electronApp, BrowserWindow, dialog } from "electron";
+import path from "path";
+import { fileURLToPath } from "url";
+import fs from "fs";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Use Chromium's print preview on Windows instead of "This app doesn't support print preview".
+// Must be set before app is ready.
+electronApp.commandLine.appendSwitch("enable-print-preview");
+
+const PORT = process.env.PORT || 5000;
+
+// Log file path for debugging
+const logPath = path.join(electronApp.getPath("userData"), "app.log");
+
+function log(message) {
+  const timestamp = new Date().toISOString();
+  const logMessage = `[${timestamp}] ${message}\n`;
+  console.log(logMessage.trim());
+  try {
+    fs.appendFileSync(logPath, logMessage);
+  } catch (err) {
+    console.error("Failed to write to log file:", err);
+  }
+}
+
+function showError(title, message) {
+  log(`ERROR: ${title} - ${message}`);
+  dialog.showErrorBox(title, message);
+}
+
+// SQLite database path: store in Electron userData so data persists per user
+function setElectronEnv() {
+  try {
+    const userData = electronApp.getPath("userData");
+    const dataDir = path.join(userData, "data");
+    
+    // Ensure data directory exists
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
+      log(`Created data directory: ${dataDir}`);
+    }
+    
+    process.env.SQLITE_DB_PATH = path.join(dataDir, "sales_management.db");
+    if (!process.env.PORT) process.env.PORT = String(PORT);
+    
+    log(`Environment set - SQLITE_DB_PATH: ${process.env.SQLITE_DB_PATH}`);
+  } catch (err) {
+    showError("Environment Setup Error", `Failed to set up environment: ${err.message}`);
+    throw err;
+  }
+}
+
+let mainWindow = null;
+
+function createWindow() {
+  try {
+    log("Creating main window...");
+    mainWindow = new BrowserWindow({
+      width: 1200,
+      height: 800,
+      minWidth: 800,
+      minHeight: 600,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+      },
+      show: false, // Don't show until ready
+    });
+
+    // Show window when ready
+    mainWindow.once("ready-to-show", () => {
+      log("Window ready to show");
+      mainWindow.show();
+    });
+
+    // Handle navigation errors
+    mainWindow.webContents.on("did-fail-load", (event, errorCode, errorDescription, validatedURL) => {
+      log(`Failed to load: ${validatedURL} - ${errorCode}: ${errorDescription}`);
+      if (errorCode === -105 || errorCode === -106) {
+        // ERR_NAME_NOT_RESOLVED or ERR_INTERNET_DISCONNECTED
+        showError(
+          "Connection Error",
+          `Cannot connect to server at http://localhost:${PORT}.\n\n` +
+          `Error: ${errorDescription}\n\n` +
+          `Please check the log file at:\n${logPath}`
+        );
+      }
+    });
+
+    mainWindow.loadURL(`http://localhost:${PORT}`);
+
+    mainWindow.on("closed", () => {
+      log("Main window closed");
+      mainWindow = null;
+    });
+
+    // Optional: open DevTools in development
+    if (process.env.NODE_ENV === "development") {
+      mainWindow.webContents.openDevTools();
+    }
+  } catch (err) {
+    showError("Window Creation Error", `Failed to create window: ${err.message}`);
+    throw err;
+  }
+}
+
+electronApp.whenReady().then(async () => {
+  log("Electron app ready");
+  
+  try {
+    setElectronEnv();
+
+    log("Importing backend server...");
+    const { startServer } = await import("./backend/server.js");
+    
+    log(`Starting server on port ${PORT}...`);
+    await startServer(PORT);
+    log("Server started successfully");
+
+    // Wait a moment for server to be fully ready
+    await new Promise(resolve => setTimeout(resolve, 500));
+    
+    createWindow();
+  } catch (err) {
+    const errorMessage = err?.message || String(err);
+    const errorStack = err?.stack || "";
+    log(`Startup error: ${errorMessage}\n${errorStack}`);
+    showError(
+      "Startup Error",
+      `Failed to start the application:\n\n${errorMessage}\n\n` +
+      `Check the log file for details:\n${logPath}`
+    );
+    electronApp.quit();
+  }
+});
+
+electronApp.on("window-all-closed", () => {
+  log("All windows closed, quitting app");
+  electronApp.quit();
+});
+
+electronApp.on("activate", () => {
+  if (mainWindow === null) {
+    log("App activated, creating window");
+    createWindow();
+  }
+});
+
+// Handle uncaught errors
+process.on("uncaughtException", (err) => {
+  log(`Uncaught exception: ${err.message}\n${err.stack}`);
+  showError("Application Error", `An unexpected error occurred:\n\n${err.message}`);
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+  log(`Unhandled rejection: ${reason}`);
+  showError("Promise Rejection", `An unhandled promise rejection occurred:\n\n${reason}`);
+});

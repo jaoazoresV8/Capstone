@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sales Management | Login</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/css/bootstrap.min.css" />
+    <link rel="stylesheet" href="./css/styles.css" />
+  </head>
+  <body>
+    <main class="auth-root d-flex align-items-center">
+      <div class="container">
+        <div class="row justify-content-center">
+          <div class="col-12 col-md-8 col-lg-6">
+            <div class="auth-card card shadow-sm">
+              <div class="card-body p-4 p-md-5">
+                <div
+                  class="brand d-flex align-items-center justify-content-center mb-3"
+                >
+                  <div class="brand-text text-center">
+                    <h1 class="h4 mb-1 fw-semibold">D&amp;M's Construction Supply</h1>
+                    <p class="text-muted small mb-0">Staff sign in to continue</p>
+                  </div>
+                </div>
+
+                <form id="login-form" class="auth-form active mt-2">
+                  <div class="mb-3">
+                    <label for="login-username" class="form-label small"
+                      >Username</label
+                    >
+                    <input
+                      type="text"
+                      id="login-username"
+                      class="form-control"
+                      autocomplete="username"
+                      placeholder="Enter your username"
+                      required
+                    />
+                  </div>
+                  <div class="mb-3">
+                    <label for="login-password" class="form-label small"
+                      >Password</label
+                    >
+                    <div class="password-wrapper d-flex">
+                      <input
+                        type="password"
+                        id="login-password"
+                        class="form-control"
+                        autocomplete="current-password"
+                        placeholder="Enter your password"
+                        required
+                      />
+                      <button
+                        type="button"
+                        class="password-toggle btn btn-outline-secondary btn-sm ms-2"
+                        data-target="login-password"
+                      >
+                        Show
+                      </button>
+                    </div>
+                  </div>
+                  <button type="submit" class="btn btn-primary w-100">
+                    Sign In
+                  </button>
+                  <div class="d-flex justify-content-between align-items-center mt-3 flex-wrap gap-1">
+                    <button
+                      type="button"
+                      class="btn btn-link p-0 small"
+                      data-bs-toggle="modal"
+                      data-bs-target="#forgotPasswordModal"
+                      id="btn-forgot-password"
+                    >
+                      Forgot password?
+                    </button>
+                  </div>
+                </form>
+
+                <div
+                  id="auth-feedback"
+                  class="auth-feedback mt-3"
+                  aria-live="polite"
+                ></div>
+
+                <p class="footer-note text-muted small mt-3 mb-0">
+                  Powered by  D&amp;M's Construction
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Forgot Password Modal -->
+    <div
+      class="modal fade"
+      id="forgotPasswordModal"
+      tabindex="-1"
+      aria-labelledby="forgotPasswordModalLabel"
+      aria-hidden="true"
+    >
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+          <form id="forgot-password-form">
+            <div class="modal-header">
+              <h5 class="modal-title" id="forgotPasswordModalLabel">Forgot Password</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+              <p class="small text-muted mb-3">
+                Enter your username. This will notify the admin to reset your password and send it to your email on file.
+              </p>
+              <label for="forgot-username" class="form-label small">Username</label>
+              <input
+                type="text"
+                class="form-control"
+                id="forgot-username"
+                autocomplete="username"
+                placeholder="Enter your username"
+                required
+              />
+              <div id="forgot-feedback" class="small mt-3"></div>
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+              <button type="submit" class="btn btn-primary">Send Request</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <script src="/js/bootstrap.bundle.min.js"></script>
+    <script src="./js/auth.js" type="module"></script>
+  </body>
+</html>
+

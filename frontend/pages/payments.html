@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Payments - D&amp;M Sales</title>
+    <link rel="stylesheet" href="/css/bootstrap.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" crossorigin="anonymous" />
+    <link rel="stylesheet" href="../css/dashboard.css" />
+    <style>
+      .payments-table th,
+      .payments-table td {
+        padding-left: 0.75rem;
+        padding-right: 0.75rem;
+      }
+      .payments-amount-col { min-width: 8rem; padding-left: 0.5rem !important; padding-right: 2.5rem !important; }
+      .payments-date-col { min-width: 11rem; padding-left: 3rem !important; padding-right: 1rem !important; }
+      .payments-ref-gcash { background-color: #cce5ff !important; color: #004085 !important; }
+      .payments-ref-paymaya { background-color: #d4edda !important; color: #155724 !important; }
+      .payments-ref-cash { background-color: #fff3cd !important; color: #856404 !important; }
+    </style>
+  </head>
+  <body data-page="payments" class="page-loading">
+    <div id="app-nav"></div>
+    <script src="../js/nav-inline.js"></script>
+
+    <main class="app-main container py-4">
+      <div class="mb-3">
+        <h1 class="h4 mb-1">Payments</h1>
+        <p class="text-muted small mb-0">
+          Record payments and keep customer balances up to date.
+        </p>
+      </div>
+
+      <div class="card border-0 shadow-sm">
+        <div class="card-body">
+          <div class="app-filter-bar mb-3">
+            <div class="search-wrap input-group input-group-sm">
+              <span class="input-group-text bg-white"><i class="bi bi-search text-muted"></i></span>
+              <input type="text" class="form-control" id="payments-search" placeholder="Search payment #, sale #, or reference…" autocomplete="off" />
+            </div>
+            <select class="form-select form-select-sm" id="payments-filter-mode">
+              <option value="">All modes</option>
+              <option value="cash">Cash</option>
+              <option value="gcash">GCash</option>
+              <option value="paymaya">PayMaya</option>
+            </select>
+            <button class="btn btn-primary btn-sm" type="button" id="btn-payments-search">
+              <i class="bi bi-funnel"></i> Apply
+            </button>
+          </div>
+
+          <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0 payments-table">
+              <thead>
+                <tr>
+                  <th>Sale #</th>
+                  <th>Payments</th>
+                  <th class="text-end payments-amount-col">Total paid</th>
+                  <th class="payments-date-col">Last payment</th>
+                  <th>Mode</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="payments-tbody">
+                <tr id="payments-empty-row">
+                  <td colspan="6" class="text-muted small">
+                    Payment records will be displayed here.
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Record Payment Modal (inside main so pjax includes it when loading payments) -->
+      <div class="modal fade" id="recordPaymentModal" tabindex="-1" aria-labelledby="recordPaymentModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable">
+          <div class="modal-content">
+            <div class="modal-header border-0 pb-0">
+              <h5 class="modal-title fs-4" id="recordPaymentModalLabel">Record Payment</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body pt-0">
+              <div id="record-payment-customer-info" class="mb-4">
+                <p class="mb-1"><strong>Customer:</strong> <span id="record-payment-customer-name">—</span></p>
+                <p class="mb-0"><strong>Balance due:</strong> <span id="record-payment-balance" class="text-danger fw-bold">₱0.00</span></p>
+              </div>
+              <label class="form-label sale-label">Payment method</label>
+              <div class="row g-3 mb-4">
+                <div class="col-4">
+                  <button type="button" class="btn btn-outline-secondary w-100 h-100 p-3 d-flex flex-column align-items-center justify-content-center sale-payment-option record-payment-option sale-payment-gcash" data-payment="gcash">
+                    <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/2/2a/GCash_logo.svg/120px-GCash_logo.svg.png" alt="GCash" class="sale-payment-logo mb-2" style="max-height: 36px;" onerror="this.style.display='none'; this.nextElementSibling.classList.remove('d-none')" />
+                    <span class="d-none fw-bold sale-payment-label-gcash">GCash</span>
+                    <span class="sale-payment-sublabel">E-Wallet</span>
+                  </button>
+                </div>
+                <div class="col-4">
+                  <button type="button" class="btn btn-outline-secondary w-100 h-100 p-3 d-flex flex-column align-items-center justify-content-center sale-payment-option record-payment-option sale-payment-paymaya" data-payment="paymaya">
+                    <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/4/42/Maya_logo_%282022%29.svg/120px-Maya_logo_%282022%29.svg.png" alt="PayMaya" class="sale-payment-logo mb-2" style="max-height: 36px;" onerror="this.style.display='none'; this.nextElementSibling.classList.remove('d-none')" />
+                    <span class="d-none fw-bold sale-payment-label-paymaya">PayMaya</span>
+                    <span class="sale-payment-sublabel">E-Wallet</span>
+                  </button>
+                </div>
+                <div class="col-4">
+                  <button type="button" class="btn btn-outline-secondary w-100 h-100 p-3 d-flex flex-column align-items-center justify-content-center sale-payment-option record-payment-option" data-payment="cash">
+                    <i class="bi bi-cash-stack sale-payment-icon mb-2"></i>
+                    <span class="fw-bold">Cash</span>
+                  </button>
+                </div>
+              </div>
+              <div id="record-payment-manual-verification" class="mb-4 d-none">
+                <div class="card border">
+                  <div class="card-body">
+                    <h6 class="card-title mb-2">Manual verification</h6>
+                    <label class="form-label small mb-1">Reference no. <span class="text-danger">*</span></label>
+                    <input type="text" class="form-control" id="record-payment-reference" placeholder="Enter reference number (e.g. GCash)" autocomplete="off" />
+                    <small class="text-muted">Required for GCash/PayMaya. Saved with this payment and shown on the Payments page.</small>
+                    <div id="record-payment-reference-error" class="invalid-feedback">Please enter the reference number.</div>
+                  </div>
+                </div>
+              </div>
+              <div class="mb-3">
+                <label class="form-label sale-label">Amount to pay (₱)</label>
+                <input type="number" class="form-control form-control-lg" id="record-payment-amount" min="0" step="0.01" value="0" placeholder="0.00" />
+                <div id="record-payment-amount-error" class="invalid-feedback"></div>
+                <div id="record-payment-amount-error-big" class="alert alert-danger mt-2 mb-0 d-none" role="alert"></div>
+              </div>
+              <div class="mb-3">
+                <label class="form-label sale-label">Amount received (₱)</label>
+                <input type="number" class="form-control form-control-lg" id="record-payment-received" min="0" step="0.01" value="0" placeholder="0.00" />
+                <small class="text-muted">What the customer gave. Used to compute change.</small>
+              </div>
+              <div id="record-payment-change-wrap" class="mb-0 d-none">
+                <p class="mb-0"><strong>Change:</strong> <span id="record-payment-change" class="text-success fw-bold">₱0.00</span></p>
+              </div>
+            </div>
+            <div class="modal-footer border-0 pt-0">
+              <button type="button" class="btn btn-primary btn-sm" id="btn-record-payment-submit">Record Payment</button>
+              <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <script src="/js/bootstrap.bundle.min.js"></script>
+    <script src="/js/app-navigation.js"></script>
+    <script src="/js/modal-draggable.js"></script>
+    <script src="../js/dashboard.js" type="module"></script>
+    <script src="../js/payments.js"></script>
+  </body>
+</html>
+

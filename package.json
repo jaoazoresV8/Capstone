@@ -1,0 +1,97 @@
+{
+  "name": "sales_management",
+  "version": "1.0.0",
+  "description": "D&M Sales Management – web and desktop (Electron) with SQLite",
+  "main": "electron-main.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch backend/server.js",
+    "start": "node backend/server.js",
+    "electron": "electron .",
+    "electron:dev": "electron .",
+    "rebuild": "electron-rebuild",
+    "rebuild:node": "npm rebuild better-sqlite3",
+    "build": "electron-builder",
+    "clean:dist": "node scripts/clean-dist.cjs",
+    "clean:dist:force": "node scripts/clean-dist-force.cjs",
+    "create-icon": "node scripts/create-icon.cjs",
+    "prebuild:win": "node scripts/create-icon.cjs && node scripts/clean-dist.cjs",
+    "build:win": "electron-builder --win",
+    "build:win:fresh": "node scripts/create-icon.cjs && electron-builder --win --config electron-builder.fresh.json",
+    "dist": "electron-builder",
+    "create-shortcut": "powershell -ExecutionPolicy Bypass -File create-desktop-shortcut.ps1",
+    "check-logs": "powershell -ExecutionPolicy Bypass -File check-logs.ps1",
+    "analyze-size": "powershell -ExecutionPolicy Bypass -File analyze-size.ps1"
+  },
+  "keywords": [
+    "sales",
+    "electron",
+    "sqlite",
+    "express"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^12.6.2",
+    "cors": "^2.8.5",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "nodemailer": "^8.0.1",
+    "qrcode": "^1.5.3"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^3.7.2",
+    "electron": "^33.4.11",
+    "electron-builder": "24.6.3",
+    "nodemon": "^3.1.11",
+    "png-to-ico": "^3.0.1",
+    "pngjs": "^7.0.0"
+  },
+  "build": {
+    "appId": "com.dm.sales-management",
+    "productName": "D&M Sales Management",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "**/*",
+      "!dist/**/*",
+      "!build/**/*",
+      "!.git/**/*",
+      "!*.md",
+      "!.env",
+      "!.env.example",
+      "!node_modules/@electron/**/*",
+      "!node_modules/electron/**/*"
+    ],
+    "asarUnpack": [
+      "**/node_modules/better-sqlite3/**/*"
+    ],
+    "win": {
+      "icon": "build/icons/DM.ico",
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "D&M Sales Management"
+    }
+  }
+}

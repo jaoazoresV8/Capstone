@@ -1,0 +1,46 @@
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-lock.yaml
+
+# Logs
+logs/
+*.log
+logs/*.txt
+
+# Build / dist outputs
+dist/
+build/
+*.asar
+
+# Local environment & secrets
+.env
+.env.local
+.env.*.local
+
+# SQLite database and local data
+backend/data/
+*.db
+*.sqlite
+*.sqlite3
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Cursor / IDE metadata
+.cursor/
+
+# Electron cache / installer artifacts
+*.exe
+*.msi
+*.dll
+*.pdb
+*.nupkg
+*.blockmap
+

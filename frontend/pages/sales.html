@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sales - D&amp;M Sales</title>
+    <link rel="stylesheet" href="/css/bootstrap.min.css" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" crossorigin="anonymous" />
+    <link rel="stylesheet" href="../css/dashboard.css" />
+  </head>
+  <body data-page="sales" class="page-loading">
+    <div id="app-nav"></div>
+    <script src="../js/nav-inline.js"></script>
+
+    <main class="app-main container py-4">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <div>
+          <h1 class="h4 mb-1">Sales</h1>
+          <p class="text-muted small mb-0">
+            Record and review sales transactions and balances.
+          </p>
+        </div>
+        <button type="button" class="btn btn-primary btn-sm" id="btn-new-sale">
+          <i class="bi bi-plus-lg"></i> New Sale
+        </button>
+      </div>
+
+      <div id="sales-alert" class="alert alert-info py-2 small d-none"></div>
+
+      <div class="card border-0 shadow-sm">
+        <div class="card-body">
+          <!-- Search + Filter (same structure as products) -->
+          <div class="app-filter-bar">
+            <div class="search-wrap input-group input-group-sm">
+              <span class="input-group-text bg-white"><i class="bi bi-search text-muted"></i></span>
+              <input type="text" class="form-control" id="sales-search" placeholder="Search customer name, sale #, or status…" autocomplete="off" />
+            </div>
+            <select class="form-select form-select-sm" id="sales-filter-status">
+              <option value="">All statuses</option>
+              <option value="paid">Paid</option>
+              <option value="partial">Partial</option>
+              <option value="unpaid">Unpaid</option>
+            </select>
+            <button class="btn btn-primary btn-sm" type="button" id="btn-sales-search">
+              <i class="bi bi-funnel"></i> Apply
+            </button>
+          </div>
+
+          <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0">
+              <thead>
+                <tr>
+                  <th>Sale #</th>
+                  <th>Customer</th>
+                  <th>Total</th>
+                  <th>Paid</th>
+                  <th>Balance</th>
+                  <th>Status</th>
+                  <th>Date</th>
+                </tr>
+              </thead>
+              <tbody id="sales-tbody">
+                <tr>
+                  <td colspan="7" class="text-muted small">Loading sales…</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- New Sale Modal (3 steps) -->
+      <div class="modal fade" id="newSaleModal" tabindex="-1" aria-labelledby="newSaleModalLabel" aria-hidden="true">
+      <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+          <div class="modal-header border-0 pb-0">
+            <h5 class="modal-title fs-4" id="newSaleModalLabel">New Sale</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body pt-0">
+            <!-- Step indicator (labels only, no numbers) -->
+            <div class="d-flex justify-content-between align-items-center sale-step-bar mb-4">
+              <div class="sale-step flex-grow-1 text-center py-2" data-step="1">
+                <span class="sale-step-label">Customer</span>
+              </div>
+              <div class="sale-step-divider"></div>
+              <div class="sale-step flex-grow-1 text-center py-2" data-step="2">
+                <span class="sale-step-label">Items</span>
+              </div>
+              <div class="sale-step-divider"></div>
+              <div class="sale-step flex-grow-1 text-center py-2" data-step="3">
+                <span class="sale-step-label">Payment</span>
+              </div>
+            </div>
+
+            <!-- Step 1: Customer (name, contact, address); all transactions are walk-in -->
+            <div id="sale-step-1" class="sale-step-pane">
+              <div class="mb-3">
+                <label class="form-label sale-label">Customer Name <span class="text-danger">*</span></label>
+                <p class="text-muted sale-hint">Enter customer name. For existing customers, type to search and select—contact and address will be filled and locked until you click “Buyer changed their contact or address”. For new customers, contact and address are required.</p>
+                <input type="text" class="form-control form-control-lg" id="sale-customer-name" placeholder="Enter customer name…" autocomplete="off" required />
+                <input type="hidden" id="sale-customer-id" value="" />
+                <div id="sale-customer-list" class="list-group list-group-flush mt-3 sale-autocomplete-list"></div>
+              </div>
+              <div class="mb-3">
+                <label class="form-label sale-label">Contact</label>
+                <input type="text" class="form-control" id="sale-customer-contact" placeholder="09xxxxxxxxx or email…" autocomplete="off" maxlength="320" />
+                <div id="sale-contact-error" class="invalid-feedback"></div>
+              </div>
+              <div class="mb-3">
+                <label class="form-label sale-label">Address</label>
+                <input type="text" class="form-control" id="sale-customer-address" placeholder="Address…" autocomplete="off" />
+                <div id="sale-address-error" class="invalid-feedback"></div>
+              </div>
+              <div id="sale-customer-update-wrap" class="mb-3 d-none">
+                <p class="text-muted small mb-2">Customer changed their info? Edit above and save to update the record on the Customers page.</p>
+                <button type="button" class="btn btn-outline-primary btn-sm" id="btn-sale-update-customer">
+                  <i class="bi bi-pencil-square"></i> Update customer
+                </button>
+                <span id="sale-update-customer-msg" class="ms-2 small text-success d-none">Updated.</span>
+              </div>
+              <div class="mb-0">
+                <button type="button" class="btn btn-link btn-sm p-0 text-muted" id="btn-sale-customer-changed-info">
+                  <i class="bi bi-info-circle"></i> Buyer changed their contact or address
+                </button>
+              </div>
+            </div>
+
+            <!-- Step 2: Items (neat layout) -->
+            <div id="sale-step-2" class="sale-step-pane d-none">
+              <div class="sale-items-step">
+                <label class="form-label sale-label">Search and add items</label>
+                <p class="text-muted sale-hint mb-3">Search by product name, then click to add to the list.</p>
+                <div class="input-group input-group-lg mb-3 sale-search-wrap">
+                  <span class="input-group-text bg-white"><i class="bi bi-search text-muted"></i></span>
+                  <input type="text" class="form-control" id="product-search" placeholder="Search product (e.g. cement)…" autocomplete="off" />
+                  <button class="btn btn-primary" type="button" id="btn-product-search">Search</button>
+                </div>
+                <div id="product-search-results" class="sale-search-results list-group mb-4"></div>
+                <div class="sale-items-card card border rounded-3">
+                  <div class="card-body p-0">
+                    <table class="table table-hover align-middle sale-items-table mb-0">
+                      <thead class="table-light">
+                        <tr>
+                          <th class="sale-th">Product</th>
+                          <th class="sale-th text-end" style="width: 120px;">Qty</th>
+                          <th class="sale-th text-end" style="width: 120px;">Price</th>
+                          <th class="sale-th text-end" style="width: 120px;">Subtotal</th>
+                          <th class="sale-th" style="width: 56px;"></th>
+                        </tr>
+                      </thead>
+                      <tbody id="sale-items-tbody">
+                        <tr id="sale-items-empty"><td colspan="5" class="text-muted text-center py-4 sale-empty-msg">Add items using search above.</td></tr>
+                      </tbody>
+                      <tfoot class="table-light">
+                        <tr class="fw-bold">
+                          <td colspan="3" class="sale-tf text-end">Total</td>
+                          <td class="sale-tf text-end" id="sale-total">₱0.00</td>
+                          <td></td>
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Step 3: Payment (GCash, PayMaya, Cash, Credit) -->
+            <div id="sale-step-3" class="sale-step-pane d-none">
+              <label class="form-label sale-label">Payment method</label>
+              <div class="row g-3 mb-4">
+                <div class="col-6 col-md-3">
+                  <button type="button" class="btn btn-outline-secondary w-100 h-100 p-3 d-flex flex-column align-items-center justify-content-center sale-payment-option sale-payment-gcash" data-payment="gcash">
+                    <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/2/2a/GCash_logo.svg/120px-GCash_logo.svg.png" alt="GCash" class="sale-payment-logo mb-2" onerror="this.style.display='none'; this.nextElementSibling.classList.remove('d-none')" />
+                    <span class="d-none fw-bold sale-payment-label-gcash">GCash</span>
+                    <span class="sale-payment-sublabel">E-Wallet</span>
+                  </button>
+                </div>
+                <div class="col-6 col-md-3">
+                  <button type="button" class="btn btn-outline-secondary w-100 h-100 p-3 d-flex flex-column align-items-center justify-content-center sale-payment-option sale-payment-paymaya" data-payment="paymaya">
+                    <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/4/42/Maya_logo_%282022%29.svg/120px-Maya_logo_%282022%29.svg.png" alt="PayMaya" class="sale-payment-logo mb-2" onerror="this.style.display='none'; this.nextElementSibling.classList.remove('d-none')" />
+                    <span class="d-none fw-bold sale-payment-label-paymaya">PayMaya</span>
+                    <span class="sale-payment-sublabel">E-Wallet</span>
+                  </button>
+                </div>
+                <div class="col-6 col-md-3">
+                  <button type="button" class="btn btn-outline-secondary w-100 h-100 p-3 d-flex flex-column align-items-center justify-content-center sale-payment-option" data-payment="cash">
+                    <i class="bi bi-cash-stack sale-payment-icon mb-2"></i>
+                    <span class="fw-bold">Cash</span>
+                  </button>
+                </div>
+                <div class="col-6 col-md-3">
+                  <button type="button" class="btn btn-outline-secondary w-100 h-100 p-3 d-flex flex-column align-items-center justify-content-center sale-payment-option sale-payment-credit" data-payment="credit">
+                    <i class="bi bi-credit-card-2-front sale-payment-icon mb-2"></i>
+                    <span class="fw-bold sale-payment-label-credit">Credit</span>
+                    <span class="sale-payment-sublabel">Pay later</span>
+                  </button>
+                </div>
+              </div>
+              
+              <!-- Manual verification for GCash/PayMaya (no QR) -->
+              <div id="sale-manual-verification" class="mb-4 d-none">
+                <div class="card border">
+                  <div class="card-body">
+                    <h6 class="card-title mb-2">Manual verification</h6>
+                    <label class="form-label small mb-1">Reference no. <span class="text-danger">*</span></label>
+                    <input type="text" class="form-control" id="sale-payment-reference" placeholder="Enter reference number from buyer (e.g. GCash)" autocomplete="off" />
+                    <small class="text-muted">Required for GCash/PayMaya. Saved with this sale and shown on the Payments page.</small>
+                    <div id="sale-payment-reference-error" class="invalid-feedback">Please enter the reference number.</div>
+                  </div>
+                </div>
+              </div>
+              
+              <div class="row g-3">
+                <div class="col-md-12">
+                  <label class="form-label sale-label">Amount to pay / Amount paid (₱)</label>
+                  <input type="number" class="form-control form-control-lg" id="sale-amount-paid" min="0" step="0.01" value="0" placeholder="0.00" />
+                  <small class="text-muted">Pre-filled with sale total. Edit for partial or credit.</small>
+                  <div id="sale-amount-paid-error" class="invalid-feedback"></div>
+                  <div id="sale-amount-paid-error-big" class="alert alert-danger mt-2 mb-0 d-none fs-5" role="alert" style="font-weight: 500;"></div>
+                </div>
+                <div class="col-md-12">
+                  <label class="form-label sale-label">Amount received (₱)</label>
+                  <input type="number" class="form-control form-control-lg" id="sale-amount-received" min="0" step="0.01" value="0" placeholder="0.00" />
+                  <small class="text-muted">What the customer gave. Used to compute change.</small>
+                </div>
+                <div class="col-md-12 d-none" id="sale-change-wrap">
+                  <p class="mb-0"><strong>Change:</strong> <span id="sale-change" class="text-success fw-bold">₱0.00</span></p>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer border-0 pt-0">
+            <button type="button" class="btn btn-outline-secondary btn-sm" id="btn-sale-back">Back</button>
+            <button type="button" class="btn btn-primary btn-sm" id="btn-sale-next">Next</button>
+            <button type="button" class="btn btn-primary btn-sm d-none" id="btn-sale-submit">Create Sale &amp; Show Receipt</button>
+            <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+          </div>
+        </div>
+      </div>
+      </div>
+
+      <!-- Receipt Modal -->
+      <div class="modal fade" id="receiptModal" tabindex="-1" aria-labelledby="receiptModalLabel" aria-hidden="true">
+      <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title fs-4" id="receiptModalLabel"><i class="bi bi-receipt text-primary me-2"></i>Receipt – Sale #<span id="receipt-sale-id"></span></h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body bg-white" id="receipt-content">
+            <!-- Filled by JS -->
+          </div>
+          <div class="modal-footer flex-wrap">
+            <p class="text-muted small mb-0 me-auto align-self-center">You can review the receipt above before printing.</p>
+            <div>
+              <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+              <button type="button" class="btn btn-primary btn-sm" id="btn-print-receipt"><i class="bi bi-printer"></i> Print</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      </div>
+
+    </main>
+
+    <script src="/js/bootstrap.bundle.min.js"></script>
+    <script src="/js/app-navigation.js"></script>
+    <script src="/js/modal-draggable.js"></script>
+    <script src="/js/dashboard.js" type="module"></script>
+    <script src="/js/sales.js" type="module"></script>
+  </body>
+</html>
