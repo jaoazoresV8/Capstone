@@ -1,8 +1,4 @@
-
-const API_ORIGIN =
-  window.location.port === "5500"
-    ? "http://localhost:5000"
-    : window.location.origin;
+import { API_ORIGIN } from "./config.js";
 const PRODUCTS_API = `${API_ORIGIN}/api/products`;
 const SUPPLIERS_API = `${API_ORIGIN}/api/suppliers`;
 const SETTINGS_API = `${API_ORIGIN}/api/settings`;
@@ -43,6 +39,57 @@ let allProducts = [];
 let globalMarkupPercent = 10; 
 let productsHasMore = false;
 let productsLoading = false;
+
+let productCategories = [];
+
+function isCurrentUserAdmin() {
+  const raw = localStorage.getItem("sm_user");
+  if (!raw) return false;
+  try {
+    const user = JSON.parse(raw);
+    return !!user && user.role === "admin";
+  } catch {
+    return false;
+  }
+}
+
+function computeProductCategories(list) {
+  const set = new Set();
+  (list || []).forEach((p) => {
+    const cat = (p.category || "").trim();
+    if (cat) set.add(cat);
+  });
+  productCategories = Array.from(set).sort((a, b) => a.localeCompare(b));
+}
+
+function renderProductCategoryOptions() {
+  const select = document.getElementById("product-category");
+  if (!select) return;
+  const current = select.value;
+  const previous = select.getAttribute("data-prev") || "";
+  const desiredValue = current || previous || "";
+
+  select.innerHTML = '<option value="">Select category…</option>' + productCategories.map((c) => `<option value="${c}">${c}</option>`).join("");
+
+  if (desiredValue && productCategories.includes(desiredValue)) {
+    select.value = desiredValue;
+  } else {
+    select.value = "";
+  }
+}
+
+function setProductCategoryValue(category) {
+  const select = document.getElementById("product-category");
+  if (!select) return;
+  const cat = (category || "").trim();
+  select.setAttribute("data-prev", cat);
+  if (cat && !productCategories.includes(cat)) {
+    productCategories.push(cat);
+    productCategories.sort((a, b) => a.localeCompare(b));
+  }
+  renderProductCategoryOptions();
+  if (cat) select.value = cat;
+}
 
 function getProductsParams() {
   const q = document.getElementById("product-search-filter")?.value?.trim() ?? "";
@@ -117,6 +164,9 @@ function loadProducts(opts = {}) {
           renderProducts(list);
         }
       }
+
+      computeProductCategories(allProducts);
+      renderProductCategoryOptions();
 
       const loadMoreEl = document.getElementById("products-load-more");
       if (loadMoreEl) {
@@ -688,6 +738,67 @@ document.addEventListener("click", (e) => {
       .catch((err) => showAlert(err.message || "Failed to update markup.", "danger"));
     return;
   }
+  if (e.target.closest("#btn-product-add-category")) {
+    if (!isCurrentUserAdmin()) {
+      showAlert("Only admins can add new categories.", "warning");
+      return;
+    }
+    const name = (window.prompt("Enter new product category name:") || "").trim();
+    if (!name) return;
+    if (productCategories.some((c) => c.toLowerCase() === name.toLowerCase())) {
+      setProductCategoryValue(name);
+      return;
+    }
+    productCategories.push(name);
+    productCategories.sort((a, b) => a.localeCompare(b));
+    setProductCategoryValue(name);
+    return;
+  }
+  if (e.target.closest("#btn-product-edit-category")) {
+    if (!isCurrentUserAdmin()) {
+      showAlert("Only admins can rename categories.", "warning");
+      return;
+    }
+    const select = document.getElementById("product-category");
+    if (!select) return;
+    const current = (select.value || "").trim();
+    if (!current) {
+      showAlert("Select a category to rename.", "warning");
+      return;
+    }
+    const name = (window.prompt("Rename category:", current) || "").trim();
+    if (!name || name === current) return;
+    const exists = productCategories.some((c) => c.toLowerCase() === name.toLowerCase());
+    if (exists && name.toLowerCase() !== current.toLowerCase()) {
+      showAlert("A category with that name already exists.", "warning");
+      return;
+    }
+    productCategories = productCategories.map((c) => (c === current ? name : c));
+    productCategories.sort((a, b) => a.localeCompare(b));
+    setProductCategoryValue(name);
+    showAlert("Category renamed for new products. Existing products keep their saved category.", "info");
+    return;
+  }
+  if (e.target.closest("#btn-product-archive-category")) {
+    if (!isCurrentUserAdmin()) {
+      showAlert("Only admins can archive categories.", "warning");
+      return;
+    }
+    const select = document.getElementById("product-category");
+    if (!select) return;
+    const current = (select.value || "").trim();
+    if (!current) {
+      showAlert("Select a category to archive.", "warning");
+      return;
+    }
+    if (!window.confirm(`Archive category "${current}"?\n\nExisting products will keep this category, but it will no longer be available for new products.`)) {
+      return;
+    }
+    productCategories = productCategories.filter((c) => c !== current);
+    setProductCategoryValue("");
+    showAlert("Category archived. Existing products keep this category, but it is no longer available for new products.", "success");
+    return;
+  }
   if (e.target.closest("#btn-product-search-filter")) {
     applyProductsFilter();
   }
@@ -703,6 +814,7 @@ document.addEventListener("click", (e) => {
     }
     document.getElementById("productModalLabel").textContent = "Add Product";
     document.getElementById("product-id").value = "";
+    setProductCategoryValue("");
     clearSupplierFields();
     collapseSupplierDetailsExtension();
     hideSupplierAutocomplete();
@@ -728,51 +840,63 @@ document.addEventListener("click", (e) => {
     const productId = editBtn.dataset.productId;
     const product = allProducts.find(p => p.id == productId);
     if (product) {
-      const modal = document.getElementById("productModal");
-      const formEl = document.getElementById("product-form");
-      if (!modal) return;
-      
-      // Populate form with product data
-      document.getElementById("productModalLabel").textContent = "Edit Product";
-      document.getElementById("product-name").value = product.name || "";
-      document.getElementById("product-category").value = product.category || "";
-      document.getElementById("product-supplier-price").value = product.supplier_price ?? 0;
-      fetchGlobalMarkup().then(() => {
-        computeSellingPrice();
-      });
-      document.getElementById("product-stock").value = product.stock_quantity ?? 0;
-      document.getElementById("product-id").value = productId || "";
-      document.getElementById("product-supplier-name").value = product.supplier_name || "";
-      collapseSupplierDetailsExtension();
-      // Load supplier contact/address into extension fields if we have supplier_id
-      if (product.supplier_id) {
-        fetch(`${SUPPLIERS_API}/${product.supplier_id}`, { headers: authHeaders() })
-          .then((r) => (r.ok ? r.json() : null))
-          .then((data) => {
-            const contactEl = document.getElementById("product-supplier-contact");
-            const addressEl = document.getElementById("product-supplier-address");
-            if (data?.supplier) {
-              if (contactEl) contactEl.value = data.supplier.contact || "";
-              if (addressEl) addressEl.value = data.supplier.address || "";
-            }
-            updateSupplierDetailsErrorState();
-          })
-          .catch(() => updateSupplierDetailsErrorState());
-      } else {
-        document.getElementById("product-supplier-contact").value = "";
-        document.getElementById("product-supplier-address").value = "";
-        updateSupplierDetailsErrorState();
-      }
-      if (formEl) {
-        formEl.dataset.productId = productId;
-        formEl.dataset.supplierId = product.supplier_id != null ? String(product.supplier_id) : "";
-      }
-      fetchSuppliers("").then(() => updateSupplierDetailsErrorState());
-      const m = new bootstrap.Modal(modal);
-      m.show();
+      openEditModalWithProduct(product, productId);
     }
   }
 });
+
+function openEditModalWithProduct(product, productId) {
+  const modal = document.getElementById("productModal");
+  const formEl = document.getElementById("product-form");
+  if (!modal) return;
+  document.getElementById("productModalLabel").textContent = "Edit Product";
+  document.getElementById("product-name").value = product.name || "";
+  setProductCategoryValue(product.category || "");
+  document.getElementById("product-supplier-price").value = product.supplier_price ?? 0;
+  fetchGlobalMarkup().then(() => computeSellingPrice());
+  document.getElementById("product-stock").value = product.stock_quantity ?? 0;
+  document.getElementById("product-id").value = productId || "";
+  document.getElementById("product-supplier-name").value = product.supplier_name || "";
+  collapseSupplierDetailsExtension();
+  if (product.supplier_id) {
+    fetch(`${SUPPLIERS_API}/${product.supplier_id}`, { headers: authHeaders() })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        const contactEl = document.getElementById("product-supplier-contact");
+        const addressEl = document.getElementById("product-supplier-address");
+        if (data?.supplier) {
+          if (contactEl) contactEl.value = data.supplier.contact || "";
+          if (addressEl) addressEl.value = data.supplier.address || "";
+        }
+        updateSupplierDetailsErrorState();
+      })
+      .catch(() => updateSupplierDetailsErrorState());
+  } else {
+    document.getElementById("product-supplier-contact").value = "";
+    document.getElementById("product-supplier-address").value = "";
+    updateSupplierDetailsErrorState();
+  }
+  if (formEl) {
+    formEl.dataset.productId = productId;
+    formEl.dataset.supplierId = product.supplier_id != null ? String(product.supplier_id) : "";
+  }
+  fetchSuppliers("").then(() => updateSupplierDetailsErrorState());
+  const m = new bootstrap.Modal(modal);
+  m.show();
+}
+
+function openEditModalForProductId(productId) {
+  fetch(`${PRODUCTS_API}/${productId}`, { headers: authHeaders() })
+    .then((r) => {
+      if (!r.ok) throw new Error("Product not found.");
+      return r.json();
+    })
+    .then((data) => {
+      const product = data.product;
+      if (product) openEditModalWithProduct(product, String(product.id));
+    })
+    .catch(() => showAlert("Could not load the existing product.", "warning"));
+}
 
 document.addEventListener("submit", (e) => {
   if (e.target.id !== "product-form") return;
@@ -846,17 +970,28 @@ document.addEventListener("submit", (e) => {
       })
     )
     .then((r) => {
+      if (r.status === 409) {
+        return r.json().then((d) => ({ conflict: true, existingId: d.existingId, message: d.message }));
+      }
       if (!r.ok) return r.json().then((d) => Promise.reject(new Error(d.message || "Failed to save.")));
       return r.json();
     })
     .then((response) => {
+      if (response && response.conflict && response.existingId) {
+        showAlert(response.message || "Product already exists. Opening for edit.", "info");
+        const modal = document.getElementById("productModal");
+        if (modal) {
+          const m = bootstrap.Modal.getInstance(modal);
+          if (m) m.hide();
+        }
+        openEditModalForProductId(response.existingId);
+        return;
+      }
       const modal = document.getElementById("productModal");
       if (modal) {
         const m = bootstrap.Modal.getInstance(modal);
         if (m) m.hide();
       }
-      const searchInput = document.getElementById("product-search-filter");
-      const searchQuery = searchInput ? searchInput.value.trim() : "";
       showAlert(productIdFromForm ? "Product updated successfully." : "Product added successfully.", "success");
       applyProductsFilter();
       e.target.reset();

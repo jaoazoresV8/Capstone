@@ -2,10 +2,7 @@
  * Sales page: 3-step New Sale (Customer → Items → Payment), list sales, receipt.
  * Uses event delegation so "New Sale" works after pjax load.
  */
-const API_ORIGIN =
-  window.location.port === "5500"
-    ? "http://localhost:5000"
-    : window.location.origin;
+import { API_ORIGIN } from "./config.js";
 const SALES_API = `${API_ORIGIN}/api/sales`;
 const CUSTOMERS_API = `${API_ORIGIN}/api/customers`;
 const PRODUCTS_API = `${API_ORIGIN}/api/products`;
@@ -23,6 +20,23 @@ function escapeHtml(s) {
   const div = document.createElement("div");
   div.textContent = s;
   return div.innerHTML;
+}
+
+function getCurrentUser() {
+  const raw = localStorage.getItem("sm_user");
+  if (!raw) return null;
+  try {
+    const user = JSON.parse(raw);
+    if (!user || typeof user !== "object") return null;
+    return user;
+  } catch {
+    return null;
+  }
+}
+
+function isAdmin() {
+  const user = getCurrentUser();
+  return !!user && user.role === "admin";
 }
 
 /**
@@ -1439,12 +1453,12 @@ function loadSales(searchQuery = "") {
   const token = getToken();
   if (!token) {
     console.warn("No auth token found");
-    tbody.innerHTML = '<tr><td colspan="7" class="text-danger small">Authentication required. Please login.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="text-danger small">Authentication required. Please login.</td></tr>';
     return;
   }
 
   // Show loading state
-  tbody.innerHTML = '<tr><td colspan="7" class="text-muted small">Loading sales…</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="8" class="text-muted small">Loading sales…</td></tr>';
 
   const url = searchQuery ? `${SALES_API}?q=${encodeURIComponent(searchQuery)}` : SALES_API;
   
@@ -1457,46 +1471,109 @@ function loadSales(searchQuery = "") {
     })
     .then((data) => {
       const sales = data.sales || [];
-      allSales = sales; // Store for client-side filtering
+      // Normalize with local issueState used for flag color (none | open | resolved)
+      allSales = (sales || []).map((s) => ({
+        ...s,
+        issueState: s.has_open_issue ? "open" : (s.issueState || "none"),
+      }));
       
-      if (sales.length === 0) {
+      if (allSales.length === 0) {
         tbody.innerHTML =
-          '<tr><td colspan="7" class="text-muted small">No sales found.</td></tr>';
+          '<tr><td colspan="8" class="text-muted small">No sales found.</td></tr>';
         return;
       }
-      renderSales(sales);
+      renderSales(allSales);
     })
     .catch((err) => {
       console.error("Failed to load sales:", err);
       tbody.innerHTML =
-        `<tr><td colspan="7" class="text-danger small">Failed to load sales: ${err.message || "Unknown error"}</td></tr>`;
+        `<tr><td colspan="8" class="text-danger small">Failed to load sales: ${err.message || "Unknown error"}</td></tr>`;
     });
 }
 
 function renderSales(sales) {
   const tbody = document.getElementById("sales-tbody");
   if (!tbody) return;
-  
-  tbody.innerHTML = sales
-    .map(
-      (s) => {
-        const transactionType = s.transaction_type || "";
-        const transactionTypeBadge = transactionType === "walk-in" 
-          ? '<span class="badge bg-info me-1">Walk-in</span>' 
-          : transactionType === "online" 
-          ? '<span class="badge bg-primary me-1">Online</span>' 
+
+  // Always show flagged (open issue) sales first, keeping backend order otherwise
+  const orderedSales = (sales || []).slice().sort((a, b) => {
+    const aIssue = a.issueState || (a.has_open_issue ? "open" : "none");
+    const bIssue = b.issueState || (b.has_open_issue ? "open" : "none");
+    const aFlag = aIssue === "open";
+    const bFlag = bIssue === "open";
+    if (aFlag === bFlag) return 0;
+    return aFlag ? -1 : 1;
+  });
+
+  tbody.innerHTML = orderedSales
+    .map((s) => {
+      const transactionType = s.transaction_type || "";
+      const transactionTypeBadge =
+        transactionType === "walk-in"
+          ? '<span class="badge bg-info me-1">Walk-in</span>'
+          : transactionType === "online"
+          ? '<span class="badge bg-primary me-1">Online</span>'
           : "";
-        return `<tr>
+
+      const statusBadgeClass =
+        s.status === "paid"
+          ? "success"
+          : s.status === "partial"
+          ? "warning"
+          : "secondary";
+
+      const issueState = s.issueState || (s.has_open_issue ? "open" : "none");
+      let flagColorClass = "text-secondary";
+      if (issueState === "open") flagColorClass = "text-danger";
+      else if (issueState === "resolved") flagColorClass = "text-success";
+
+      const flagButton = `
+        <button type="button" class="btn btn-sm btn-link p-0 me-1 ${flagColorClass}" data-action="flag-sale" data-sale-id="${s.id}" title="Flag issue">
+          <i class="bi bi-flag-fill"></i>
+        </button>`;
+
+      const dropdown =
+        isAdmin()
+          ? `<div class="btn-group">
+              <button type="button" class="btn btn-outline-secondary btn-sm dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false">
+                Details
+              </button>
+              <ul class="dropdown-menu dropdown-menu-end">
+                <li>
+                  <button class="dropdown-item" type="button" data-action="review-issues" data-sale-id="${s.id}">
+                    <i class="bi bi-clipboard-check"></i> View status & history…
+                  </button>
+                </li>
+              </ul>
+            </div>`
+          : "";
+
+      const isFlaggedOpen = issueState === "open";
+      const rowClasses = isFlaggedOpen ? "sale-issue-open" : "";
+      const rowAttrs = [
+        `data-sale-id="${s.id}"`,
+        issueState ? `data-issue-state="${issueState}"` : "",
+        isFlaggedOpen ? 'data-kanban-group="Flagged"' : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+
+      return `<tr${rowClasses ? ` class="${rowClasses}"` : ""} ${rowAttrs}>
           <td>${s.id}</td>
           <td>${transactionTypeBadge}${escapeHtml(s.customer_name || "—")}</td>
           <td>₱${Number(s.total_amount || 0).toFixed(2)}</td>
           <td>₱${Number(s.amount_paid || 0).toFixed(2)}</td>
           <td>₱${Number(s.remaining_balance || 0).toFixed(2)}</td>
-          <td><span class="badge bg-${s.status === "paid" ? "success" : s.status === "partial" ? "warning" : "secondary"}">${escapeHtml(s.status || "")}</span></td>
+          <td><span class="badge bg-${statusBadgeClass}">${escapeHtml(s.status || "")}</span></td>
           <td>${s.sale_date ? new Date(s.sale_date).toLocaleDateString() : ""}</td>
+          <td class="text-end">
+            <div class="d-inline-flex align-items-center">
+              ${flagButton}
+              ${dropdown}
+            </div>
+          </td>
         </tr>`;
-      }
-    )
+    })
     .join("");
 }
 
@@ -1516,7 +1593,18 @@ function filterSales(query, statusFilter) {
   if (status) {
     filtered = filtered.filter((s) => (s.status || "").toLowerCase() === status);
   }
-  renderSales(filtered);
+
+  // Keep flagged (open issue) sales at the top even when filtering
+  const ordered = filtered.slice().sort((a, b) => {
+    const aIssue = a.issueState || (a.has_open_issue ? "open" : "none");
+    const bIssue = b.issueState || (b.has_open_issue ? "open" : "none");
+    const aFlag = aIssue === "open";
+    const bFlag = bIssue === "open";
+    if (aFlag === bFlag) return 0;
+    return aFlag ? -1 : 1;
+  });
+
+  renderSales(ordered);
 }
 
 function applySalesFilter() {
@@ -1547,6 +1635,369 @@ document.addEventListener("click", (e) => {
 document.addEventListener("change", (e) => {
   if (e.target.id === "sales-filter-status") {
     applySalesFilter();
+  }
+});
+
+// ----- Flag Issue: cashier/staff -----
+let currentFlagSaleId = null;
+
+function openFlagIssueModal(saleId) {
+  currentFlagSaleId = saleId;
+  const sale = allSales.find((s) => String(s.id) === String(saleId));
+  const labelEl = document.getElementById("flag-issue-sale-label");
+  const idInput = document.getElementById("flag-issue-sale-id");
+  const reasonSelect = document.getElementById("flag-issue-reason");
+  const noteInput = document.getElementById("flag-issue-note");
+  const errorEl = document.getElementById("flag-issue-error");
+  if (labelEl) {
+    const label = sale
+      ? `#${sale.id} – ${sale.customer_name || "Customer"}`
+      : `#${saleId}`;
+    labelEl.textContent = label;
+  }
+  if (idInput) idInput.value = String(saleId);
+  if (reasonSelect) reasonSelect.value = "";
+  if (noteInput) noteInput.value = "";
+  if (errorEl) {
+    errorEl.textContent = "";
+    errorEl.classList.add("d-none");
+  }
+  const modalEl = document.getElementById("flagIssueModal");
+  if (!modalEl) return;
+  const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+  modal.show();
+}
+
+async function submitFlagIssue() {
+  const saleId = currentFlagSaleId || document.getElementById("flag-issue-sale-id")?.value;
+  const reasonSelect = document.getElementById("flag-issue-reason");
+  const noteInput = document.getElementById("flag-issue-note");
+  const errorEl = document.getElementById("flag-issue-error");
+  if (!saleId || !reasonSelect) return;
+
+  const reason = reasonSelect.value;
+  const note = noteInput ? noteInput.value.trim() : "";
+  if (!reason) {
+    if (errorEl) {
+      errorEl.textContent = "Please select a reason for flagging this sale.";
+      errorEl.classList.remove("d-none");
+    }
+    return;
+  }
+
+  try {
+    const res = await fetch(`${SALES_API}/${encodeURIComponent(saleId)}/issues`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...authHeaders(),
+      },
+      body: JSON.stringify({ reason, note }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const msg = data.message || "Failed to flag issue for this sale.";
+      if (errorEl) {
+        errorEl.textContent = msg;
+        errorEl.classList.remove("d-none");
+      }
+      return;
+    }
+
+    // Mark this sale as having an open issue in memory and turn flag red
+    allSales = allSales.map((s) =>
+      String(s.id) === String(saleId)
+        ? { ...s, has_open_issue: true, issueState: "open" }
+        : s
+    );
+    renderSales(allSales);
+
+    const modalEl = document.getElementById("flagIssueModal");
+    if (modalEl) {
+      const modal = bootstrap.Modal.getInstance(modalEl);
+      if (modal) modal.hide();
+    }
+    const alertEl = document.getElementById("sales-alert");
+    if (alertEl) {
+      alertEl.textContent = "Issue flagged for this sale. An admin can now review it.";
+      alertEl.className = "alert alert-warning py-2 small";
+      alertEl.classList.remove("d-none");
+    }
+  } catch (err) {
+    if (errorEl) {
+      errorEl.textContent = err.message || "Failed to flag issue for this sale.";
+      errorEl.classList.remove("d-none");
+    }
+  }
+}
+
+document.addEventListener("click", (e) => {
+  const flagBtn = e.target.closest("button[data-action='flag-sale'][data-sale-id]");
+  if (flagBtn) {
+    const saleId = flagBtn.getAttribute("data-sale-id");
+    if (saleId) openFlagIssueModal(saleId);
+  }
+  if (e.target.closest("#btn-flag-issue-submit")) {
+    submitFlagIssue();
+  }
+});
+
+// ----- Review / Resolve Issues: admins only -----
+let currentReviewSaleId = null;
+let currentOpenIssueId = null;
+
+async function openReviewIssuesModal(saleId) {
+  if (!isAdmin()) {
+    const alertEl = document.getElementById("sales-alert");
+    if (alertEl) {
+      alertEl.textContent = "Only admins can review and resolve flagged issues.";
+      alertEl.className = "alert alert-danger py-2 small";
+      alertEl.classList.remove("d-none");
+    }
+    return;
+  }
+
+  currentReviewSaleId = saleId;
+  currentOpenIssueId = null;
+
+  const sale = allSales.find((s) => String(s.id) === String(saleId));
+  const saleLabelEl = document.getElementById("review-issue-sale-label");
+  if (saleLabelEl) {
+    const label = sale
+      ? `#${sale.id} – ${sale.customer_name || "Customer"}`
+      : `#${saleId}`;
+    saleLabelEl.textContent = label;
+  }
+
+  const listEl = document.getElementById("review-issue-list");
+  const errorEl = document.getElementById("review-issue-error");
+  const openSummaryEl = document.getElementById("review-issue-open-summary");
+  const noOpenEl = document.getElementById("review-issue-no-open");
+  const resolveSectionEl = document.getElementById("review-issue-resolve-section");
+  if (errorEl) {
+    errorEl.textContent = "";
+    errorEl.classList.add("d-none");
+  }
+  if (openSummaryEl) openSummaryEl.textContent = "";
+  if (noOpenEl) noOpenEl.classList.add("d-none");
+  if (resolveSectionEl) resolveSectionEl.classList.remove("d-none");
+
+  try {
+    const res = await fetch(`${SALES_API}/${encodeURIComponent(saleId)}/issues`, {
+      headers: authHeaders(),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const msg = data.message || "Failed to load issues for this sale.";
+      if (errorEl) {
+        errorEl.textContent = msg;
+        errorEl.classList.remove("d-none");
+      }
+      return;
+    }
+    const issues = Array.isArray(data.issues) ? data.issues : [];
+
+    if (listEl) {
+      if (!issues.length) {
+        listEl.innerHTML =
+          '<p class="text-muted small mb-0">No issues have been flagged for this sale yet.</p>';
+      } else {
+        listEl.innerHTML = issues
+          .map((iss) => {
+            const createdAt = iss.created_at
+              ? new Date(iss.created_at).toLocaleString()
+              : "";
+            const resolvedAt = iss.resolved_at
+              ? new Date(iss.resolved_at).toLocaleString()
+              : "";
+            const statusBadgeClass =
+              iss.status === "open"
+                ? "danger"
+                : iss.status === "voided" || iss.status === "refunded"
+                ? "secondary"
+                : "success";
+            const statusLabel =
+              iss.status === "voided"
+                ? "Resolved – voided"
+                : iss.status === "refunded"
+                ? "Resolved – refunded"
+                : iss.status === "resolved"
+                ? "Resolved"
+                : "Open";
+            const reasonLabel =
+              iss.reason === "wrong_item"
+                ? "Wrong item"
+                : iss.reason === "pricing_error"
+                ? "Pricing error"
+                : iss.reason === "duplicate"
+                ? "Duplicate transaction"
+                : iss.reason === "payment_issue"
+                ? "Payment issue"
+                : "Other";
+            return `
+              <div class="border rounded-3 p-2 mb-2">
+                <div class="d-flex justify-content-between align-items-center mb-1">
+                  <div class="small">
+                    <span class="fw-semibold">${reasonLabel}</span>
+                    <span class="text-muted"> – flagged by ${
+                      iss.cashier_name || `User #${iss.cashier_id}`
+                    }</span>
+                  </div>
+                  <span class="badge bg-${statusBadgeClass}">${statusLabel}</span>
+                </div>
+                <div class="small text-muted mb-1">Flagged: ${createdAt}</div>
+                ${
+                  iss.note
+                    ? `<div class="small mb-1"><strong>Note:</strong> ${escapeHtml(
+                        iss.note
+                      )}</div>`
+                    : ""
+                }
+                ${
+                  iss.resolution_note
+                    ? `<div class="small mt-1 border-top pt-1">
+                        <div><strong>Resolved by:</strong> ${
+                          iss.resolved_by_admin_name ||
+                          (iss.resolved_by_admin_id
+                            ? `Admin #${iss.resolved_by_admin_id}`
+                            : "Admin")
+                        }</div>
+                        <div><strong>Resolved at:</strong> ${resolvedAt}</div>
+                        <div><strong>Resolution:</strong> ${escapeHtml(
+                          iss.resolution_note
+                        )}</div>
+                      </div>`
+                    : ""
+                }
+              </div>
+            `;
+          })
+          .join("");
+      }
+    }
+
+    const openIssue = issues.find((iss) => iss.status === "open");
+    currentOpenIssueId = openIssue ? openIssue.issue_id : null;
+    if (!openIssue) {
+      if (resolveSectionEl) resolveSectionEl.classList.add("d-none");
+      if (noOpenEl) noOpenEl.classList.remove("d-none");
+    } else if (openSummaryEl) {
+      const reasonLabel =
+        openIssue.reason === "wrong_item"
+          ? "Wrong item"
+          : openIssue.reason === "pricing_error"
+          ? "Pricing error"
+          : openIssue.reason === "duplicate"
+          ? "Duplicate transaction"
+          : openIssue.reason === "payment_issue"
+          ? "Payment issue"
+          : "Other";
+      openSummaryEl.textContent = `${reasonLabel} – flagged by ${
+        openIssue.cashier_name || `User #${openIssue.cashier_id}`
+      }`;
+    }
+
+    const modalEl = document.getElementById("reviewIssueModal");
+    if (modalEl) {
+      const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+      modal.show();
+    }
+  } catch (err) {
+    if (errorEl) {
+      errorEl.textContent = err.message || "Failed to load sale issues.";
+      errorEl.classList.remove("d-none");
+    }
+  }
+}
+
+async function submitIssueResolution() {
+  if (!isAdmin() || !currentReviewSaleId || !currentOpenIssueId) return;
+
+  const actionSelect = document.getElementById("issue-resolution-action");
+  const noteInput = document.getElementById("issue-resolution-note");
+  const errorEl = document.getElementById("review-issue-error");
+  if (!actionSelect || !noteInput) return;
+
+  const action = actionSelect.value || "resolved";
+  const note = noteInput.value.trim();
+  if (!note) {
+    if (errorEl) {
+      errorEl.textContent = "Resolution note is required.";
+      errorEl.classList.remove("d-none");
+    }
+    return;
+  }
+
+  let status = "resolved";
+  if (action === "void") status = "voided";
+  else if (action === "refund") status = "refunded";
+
+  try {
+    const res = await fetch(
+      `${SALES_API}/${encodeURIComponent(
+        currentReviewSaleId
+      )}/issues/${encodeURIComponent(currentOpenIssueId)}`,
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          ...authHeaders(),
+        },
+        body: JSON.stringify({
+          resolution_note: note,
+          resolution_action: action,
+          status,
+        }),
+      }
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const msg = data.message || "Failed to save resolution.";
+      if (errorEl) {
+        errorEl.textContent = msg;
+        errorEl.classList.remove("d-none");
+      }
+      return;
+    }
+
+    // Once resolved, clear open flag for this sale and turn flag green
+    allSales = allSales.map((s) =>
+      String(s.id) === String(currentReviewSaleId)
+        ? { ...s, has_open_issue: false, issueState: "resolved" }
+        : s
+    );
+    renderSales(allSales);
+
+    const modalEl = document.getElementById("reviewIssueModal");
+    if (modalEl) {
+      const modal = bootstrap.Modal.getInstance(modalEl);
+      if (modal) modal.hide();
+    }
+
+    const alertEl = document.getElementById("sales-alert");
+    if (alertEl) {
+      alertEl.textContent = "Issue resolution saved.";
+      alertEl.className = "alert alert-success py-2 small";
+      alertEl.classList.remove("d-none");
+    }
+  } catch (err) {
+    if (errorEl) {
+      errorEl.textContent = err.message || "Failed to save resolution.";
+      errorEl.classList.remove("d-none");
+    }
+  }
+}
+
+document.addEventListener("click", (e) => {
+  const reviewBtn = e.target.closest(
+    "button[data-action='review-issues'][data-sale-id]"
+  );
+  if (reviewBtn) {
+    const saleId = reviewBtn.getAttribute("data-sale-id");
+    if (saleId) openReviewIssuesModal(saleId);
+  }
+  if (e.target.closest("#btn-issue-resolve")) {
+    submitIssueResolution();
   }
 });
 
@@ -1646,4 +2097,27 @@ if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", setupSalesMainObserver);
 } else {
   setupSalesMainObserver();
+}
+
+// If navigated from the admin "Sale issues" modal with a specific saleId, auto-open its issues modal for admins.
+function maybeOpenIssueFromQuery() {
+  try {
+    const params = new URLSearchParams(window.location.search || "");
+    const saleId = params.get("saleId");
+    const focusIssue = params.get("focusIssue");
+    if (!saleId || focusIssue !== "1") return;
+    if (!isAdmin()) return;
+    // Give the page a short time to render before opening
+    setTimeout(() => {
+      openReviewIssuesModal(saleId);
+    }, 300);
+  } catch {
+    // Ignore query parsing errors
+  }
+}
+
+if (document.readyState === "loading") {
+  window.addEventListener("DOMContentLoaded", maybeOpenIssueFromQuery);
+} else {
+  maybeOpenIssueFromQuery();
 }

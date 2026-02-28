@@ -7,6 +7,7 @@
     "sales.html": "sales",
     "payments.html": "payments",
     "reports.html": "reports",
+    "users.html": "users",
   };
 
  
@@ -16,6 +17,7 @@
     "customers": ["/js/customers.js"],
     "payments": ["/js/payments.js"],
     "reports": ["/js/reports.js"],
+    "users": ["/js/users.js"],
   };
 
   function getPageFromHref(href) {
@@ -53,9 +55,18 @@
     document.body.appendChild(script);
   }
 
+  function ensureViewToggle() {
+    if (document.querySelector('script[src*="view-toggle.js"]')) return;
+    var script = document.createElement("script");
+    script.src = "/js/view-toggle.js";
+    script.async = false;
+    document.body.appendChild(script);
+  }
+
  
   function loadPageScripts(page) {
     ensureModalDraggable();
+    ensureViewToggle();
     var scripts = PAGE_SCRIPTS[page];
     if (!scripts || !scripts.length) return;
     scripts.forEach(function (src) {
@@ -111,7 +122,7 @@
     if (!href || href.startsWith("#") || href.startsWith("mailto:") || href.startsWith("tel:")) return;
     if (!isSameOrigin(href)) return;
     var pageFile = getPageFromHref(href);
-    if (!pageFile || pageFile === "users.html") return;
+    if (!pageFile) return;
     e.preventDefault();
     loadPage(href, true);
   }, false);
@@ -122,9 +133,14 @@
     }
   });
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", ensureModalDraggable);
-  } else {
+  function ensureGlobalScripts() {
     ensureModalDraggable();
+    ensureViewToggle();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", ensureGlobalScripts);
+  } else {
+    ensureGlobalScripts();
   }
 })();

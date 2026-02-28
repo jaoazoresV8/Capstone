@@ -13,8 +13,15 @@
         padding-left: 0.75rem;
         padding-right: 0.75rem;
       }
-      .payments-amount-col { min-width: 8rem; padding-left: 0.5rem !important; padding-right: 2.5rem !important; }
-      .payments-date-col { min-width: 11rem; padding-left: 3rem !important; padding-right: 1rem !important; }
+      .payments-amount-col { min-width: 8rem; }
+      .payments-date-col { min-width: 11rem; }
+      /* Extra gap between header labels only (does not widen data cells) */
+      .payments-table thead .payments-amount-col {
+        padding-right: 1.5rem !important;
+      }
+      .payments-table thead .payments-date-col {
+        padding-left: 1.5rem !important;
+      }
       .payments-ref-gcash { background-color: #cce5ff !important; color: #004085 !important; }
       .payments-ref-paymaya { background-color: #d4edda !important; color: #155724 !important; }
       .payments-ref-cash { background-color: #fff3cd !important; color: #856404 !important; }
@@ -34,6 +41,24 @@
 
       <div class="card border-0 shadow-sm">
         <div class="card-body">
+          <div class="view-toggle-bar">
+            <div class="view-toggle-label">
+              <i class="bi bi-layout-sidebar-inset"></i>
+              View
+            </div>
+            <div class="btn-group btn-group-sm view-toggle-group" role="group" aria-label="Payments view" data-view-target="payments">
+              <button type="button" class="btn btn-outline-secondary view-toggle-btn active" data-view="table">
+                <i class="bi bi-table"></i><span class="d-none d-sm-inline ms-1">Table</span>
+              </button>
+              <button type="button" class="btn btn-outline-secondary view-toggle-btn" data-view="card">
+                <i class="bi bi-grid-3x3-gap"></i><span class="d-none d-sm-inline ms-1">Card</span>
+              </button>
+              <button type="button" class="btn btn-outline-secondary view-toggle-btn" data-view="kanban">
+                <i class="bi bi-layout-three-columns"></i><span class="d-none d-sm-inline ms-1">Kanban</span>
+              </button>
+            </div>
+          </div>
+
           <div class="app-filter-bar mb-3">
             <div class="search-wrap input-group input-group-sm">
               <span class="input-group-text bg-white"><i class="bi bi-search text-muted"></i></span>
@@ -50,8 +75,9 @@
             </button>
           </div>
 
-          <div class="table-responsive">
-            <table class="table table-sm align-middle mb-0 payments-table">
+          <div class="data-view-section" data-view-id="payments">
+            <div class="table-responsive data-view-table-wrap">
+              <table class="table table-sm align-middle mb-0 payments-table" data-kanban-header="Mode">
               <thead>
                 <tr>
                   <th>Sale #</th>
@@ -63,18 +89,21 @@
                 </tr>
               </thead>
               <tbody id="payments-tbody">
-                <tr id="payments-empty-row">
+                <tr id="payments-empty-row" data-view-placeholder="true">
                   <td colspan="6" class="text-muted small">
                     Payment records will be displayed here.
                   </td>
                 </tr>
               </tbody>
-            </table>
+              </table>
+            </div>
+            <div class="data-view-cards data-card-grid"></div>
+            <div class="data-view-kanban"></div>
           </div>
         </div>
       </div>
 
-      <!-- Record Payment Modal (inside main so pjax includes it when loading payments) -->
+      
       <div class="modal fade" id="recordPaymentModal" tabindex="-1" aria-labelledby="recordPaymentModalLabel" aria-hidden="true">
         <div class="modal-dialog modal-lg modal-dialog-scrollable">
           <div class="modal-content">
@@ -143,13 +172,34 @@
           </div>
         </div>
       </div>
+
+      <!-- Payment details modal (used in table, card, and kanban views) -->
+      <div class="modal fade" id="paymentDetailsModal" tabindex="-1" aria-labelledby="paymentDetailsModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title" id="paymentDetailsModalLabel">Payment details</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+              <div id="payment-details-body" class="small text-muted">
+                Loading…
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+            </div>
+          </div>
+        </div>
+      </div>
     </main>
 
     <script src="/js/bootstrap.bundle.min.js"></script>
     <script src="/js/app-navigation.js"></script>
     <script src="/js/modal-draggable.js"></script>
+    <script src="../js/view-toggle.js"></script>
     <script src="../js/dashboard.js" type="module"></script>
-    <script src="../js/payments.js"></script>
+    <script src="../js/payments.js" type="module"></script>
   </body>
 </html>
 

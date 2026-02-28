@@ -1,24 +1,112 @@
 import express from "express";
 import pool, { getTableColumns } from "../db.js";
-import { authenticateToken } from "../middleware/authMiddleware.js";
+import { authenticateToken, requireAdmin } from "../middleware/authMiddleware.js";
+import { logChange } from "../changeLog.js";
 
 const router = express.Router();
 router.use(authenticateToken);
 
+// Helper: check if local sale_issues table exists (offline flagging support)
+function hasSaleIssuesTable() {
+  try {
+    const cols = getTableColumns("sale_issues");
+    return Array.isArray(cols) && cols.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+// GET /api/sales/issues/open-count - count of open sale issues (for admin nav indicator)
+router.get("/issues/open-count", requireAdmin, async (req, res) => {
+  try {
+    if (!hasSaleIssuesTable()) {
+      return res.json({ open: 0 });
+    }
+    const [rows] = await pool.query(
+      "SELECT COUNT(*) AS open_count FROM sale_issues WHERE status = 'open'"
+    );
+    const open = rows && rows.length > 0 ? Number(rows[0].open_count) || 0 : 0;
+    return res.json({ open });
+  } catch (err) {
+    console.error("GET /api/sales/issues/open-count:", err);
+    return res.status(500).json({ message: "Failed to load open sale issues count." });
+  }
+});
+
+// GET /api/sales/issues - list flagged sale issues (default: open only) for admin nav modal
+router.get("/issues", requireAdmin, async (req, res) => {
+  try {
+    if (!hasSaleIssuesTable()) {
+      return res.json({ issues: [] });
+    }
+
+    const status = String(req.query.status || "open").toLowerCase();
+    let where = "";
+    const params = [];
+    if (status === "open") {
+      where = "WHERE si.status = 'open'";
+    } else if (status === "resolved") {
+      where = "WHERE si.status = 'resolved'";
+    } else if (status === "voided") {
+      where = "WHERE si.status = 'voided'";
+    } else if (status === "refunded") {
+      where = "WHERE si.status = 'refunded'";
+    }
+
+    const [rows] = await pool.query(
+      `
+      SELECT
+        si.issue_id,
+        si.sale_id,
+        si.reason,
+        si.note,
+        si.status,
+        si.cashier_id,
+        si.cashier_name,
+        si.created_at,
+        si.resolved_by_admin_id,
+        si.resolved_by_admin_name,
+        si.resolution_note,
+        si.resolution_action,
+        si.resolved_at,
+        s.total_amount,
+        s.amount_paid,
+        s.remaining_balance,
+        s.status AS sale_status,
+        s.sale_date,
+        s.customer_name
+      FROM sale_issues si
+      LEFT JOIN sales s ON s.sale_id = si.sale_id
+      ${where}
+      ORDER BY si.status = 'open' DESC, si.created_at DESC, si.issue_id DESC
+      LIMIT 100
+      `,
+      params
+    );
+
+    return res.json({ issues: rows || [] });
+  } catch (err) {
+    console.error("GET /api/sales/issues:", err);
+    return res.status(500).json({ message: "Failed to load sale issues." });
+  }
+});
+
 // GET /api/sales - list sales with customer name (payment_method from payments.reference_number or 'cash')
+// Also includes has_open_issue flag when sale_issues table is present.
 router.get("/", async (req, res) => {
   try {
     const columns = getTableColumns("sales");
     const hasTransactionType = columns.includes("transaction_type");
     const hasCustomerName = columns.includes("customer_name");
     const hasOrNumber = columns.includes("or_number");
+    const hasIssues = hasSaleIssuesTable();
     
     let query;
     if (hasCustomerName) {
       query = `SELECT s.sale_id AS id, s.customer_id, COALESCE(c.name, s.customer_name) AS customer_name,
                       s.total_amount, s.amount_paid, s.remaining_balance, s.status,
-                      s.sale_date, ${hasTransactionType ? 's.transaction_type' : 'NULL AS transaction_type'}, 
-                      ${hasOrNumber ? 's.or_number' : 'NULL AS or_number'},
+                      s.sale_date, ${hasTransactionType ? "s.transaction_type" : "NULL AS transaction_type"}, 
+                      ${hasOrNumber ? "s.or_number" : "NULL AS or_number"},
                       s.customer_name AS walk_in_customer_name
                FROM sales s
                LEFT JOIN customers c ON c.customer_id = s.customer_id
@@ -27,7 +115,7 @@ router.get("/", async (req, res) => {
       query = `SELECT s.sale_id AS id, s.customer_id, c.name AS customer_name,
                       s.total_amount, s.amount_paid, s.remaining_balance, s.status,
                       s.sale_date, NULL AS transaction_type, NULL AS walk_in_customer_name,
-                      ${hasOrNumber ? 's.or_number' : 'NULL AS or_number'}
+                      ${hasOrNumber ? "s.or_number" : "NULL AS or_number"}
                FROM sales s
                LEFT JOIN customers c ON c.customer_id = s.customer_id
                ORDER BY s.sale_date DESC`;
@@ -35,6 +123,7 @@ router.get("/", async (req, res) => {
     
     const [rows] = await pool.query(query);
     if (rows.length === 0) return res.json({ sales: [] });
+
     const [payments] = await pool.query(
       "SELECT sale_id, reference_number FROM payments WHERE sale_id IN (?)",
       [rows.map((r) => r.id)]
@@ -42,10 +131,27 @@ router.get("/", async (req, res) => {
     const payBySale = Object.fromEntries(
       (payments || []).map((p) => [p.sale_id, p.reference_number || "cash"])
     );
+
+    // Open issue indicator per sale (if table exists)
+    let openIssuesBySale = {};
+    if (hasIssues) {
+      const [issueRows] = await pool.query(
+        `SELECT sale_id, COUNT(*) AS open_count
+         FROM sale_issues
+         WHERE status = 'open' AND sale_id IN (?)
+         GROUP BY sale_id`,
+        [rows.map((r) => r.id)]
+      );
+      openIssuesBySale = Object.fromEntries(
+        (issueRows || []).map((row) => [row.sale_id, Number(row.open_count) || 0])
+      );
+    }
+
     const salesWithMethod = rows.map((r) => ({
       ...r,
       customer_name: r.customer_name || r.walk_in_customer_name || "—",
       payment_method: payBySale[r.id] || "cash",
+      has_open_issue: hasIssues ? Boolean(openIssuesBySale[r.id]) : false,
     }));
     return res.json({ sales: salesWithMethod });
   } catch (err) {
@@ -76,21 +182,22 @@ router.get("/:id", async (req, res) => {
     const hasTransactionType = columns.includes("transaction_type");
     const hasCustomerName = columns.includes("customer_name");
     const hasOrNumber = columns.includes("or_number");
+    const hasIssues = hasSaleIssuesTable();
     
     let query;
     if (hasCustomerName) {
       query = `SELECT s.sale_id AS id, s.customer_id, COALESCE(c.name, s.customer_name) AS customer_name, 
                       c.contact, c.address, s.customer_name AS walk_in_customer_name,
-                      ${hasOrNumber ? 's.or_number' : 'NULL AS or_number'},
+                      ${hasOrNumber ? "s.or_number" : "NULL AS or_number"},
                       s.total_amount, s.amount_paid, s.remaining_balance, s.status,
-                      s.sale_date, ${hasTransactionType ? 's.transaction_type' : 'NULL AS transaction_type'}
+                      s.sale_date, ${hasTransactionType ? "s.transaction_type" : "NULL AS transaction_type"}
                FROM sales s
                LEFT JOIN customers c ON c.customer_id = s.customer_id
                WHERE s.sale_id = ?`;
     } else {
       query = `SELECT s.sale_id AS id, s.customer_id, c.name AS customer_name, 
                       c.contact, c.address, NULL AS walk_in_customer_name,
-                      ${hasOrNumber ? 's.or_number' : 'NULL AS or_number'},
+                      ${hasOrNumber ? "s.or_number" : "NULL AS or_number"},
                       s.total_amount, s.amount_paid, s.remaining_balance, s.status,
                       s.sale_date, NULL AS transaction_type
                FROM sales s
@@ -113,11 +220,22 @@ router.get("/:id", async (req, res) => {
        WHERE si.sale_id = ? ORDER BY si.sale_item_id`,
       [req.params.id]
     );
+
+    let has_open_issue = false;
+    if (hasIssues) {
+      const [openIssues] = await pool.query(
+        "SELECT 1 FROM sale_issues WHERE sale_id = ? AND status = 'open' LIMIT 1",
+        [req.params.id]
+      );
+      has_open_issue = openIssues.length > 0;
+    }
+
     const sale = {
       ...sales[0],
       customer_name: sales[0].customer_name || sales[0].walk_in_customer_name || "—",
       payment_method,
-      items
+      items,
+      has_open_issue,
     };
     return res.json({ sale });
   } catch (err) {
@@ -334,6 +452,10 @@ router.post("/", async (req, res) => {
       or_number: newSale[0].or_number || orNumber || null,
       items: newItems.map((i) => ({ ...i, product_name: productMap[i.product_id]?.name || "" })),
     };
+
+    // Log sale + items for later central sync
+    await logChange("sale", saleWithItems.id, "create", saleWithItems);
+
     return res.status(201).json({ sale: saleWithItems });
   } catch (err) {
     await conn.rollback();
@@ -341,6 +463,188 @@ router.post("/", async (req, res) => {
     return res.status(400).json({ message: err.message || "Failed to create sale." });
   } finally {
     conn.release();
+  }
+});
+
+// POST /api/sales/:id/issues - cashier/staff flag an issue on a sale (stored in local SQLite, synced later)
+router.post("/:id/issues", async (req, res) => {
+  try {
+    const saleId = parseInt(req.params.id, 10);
+    if (!saleId || Number.isNaN(saleId) || saleId <= 0) {
+      return res.status(400).json({ message: "Invalid sale ID." });
+    }
+
+    if (!hasSaleIssuesTable()) {
+      return res.status(500).json({ message: "Issue tracking is not configured in the local database." });
+    }
+
+    const { reason, note } = req.body || {};
+    const allowedReasons = ["wrong_item", "pricing_error", "duplicate", "payment_issue", "other"];
+    if (!reason || !allowedReasons.includes(reason)) {
+      return res.status(400).json({ message: "Reason is required and must be one of: wrong_item, pricing_error, duplicate, payment_issue, other." });
+    }
+    const trimmedNote = typeof note === "string" ? note.trim() : "";
+    if (trimmedNote.length > 2000) {
+      return res.status(400).json({ message: "Note must be 2000 characters or fewer." });
+    }
+
+    // Ensure sale exists locally
+    const [sales] = await pool.query(
+      "SELECT sale_id FROM sales WHERE sale_id = ?",
+      [saleId]
+    );
+    if (!sales || sales.length === 0) {
+      return res.status(404).json({ message: "Sale not found." });
+    }
+
+    // Support different token payload shapes: { id }, { userId }, or { user_id }
+    const cashierId =
+      req.user?.id ??
+      req.user?.userId ??
+      req.user?.user_id ??
+      null;
+    const cashierName = req.user?.name || req.user?.username || null;
+    if (!cashierId) {
+      return res.status(400).json({ message: "Authenticated user information is missing from token." });
+    }
+
+    const [result] = await pool.query(
+      `INSERT INTO sale_issues (sale_id, reason, note, status, cashier_id, cashier_name, created_at)
+       VALUES (?, ?, ?, 'open', ?, ?, datetime('now','localtime'))`,
+      [saleId, reason, trimmedNote || null, cashierId, cashierName]
+    );
+
+    const [rows] = await pool.query(
+      `SELECT issue_id, sale_id, reason, note, status, cashier_id, cashier_name,
+              created_at, resolved_by_admin_id, resolved_by_admin_name,
+              resolution_note, resolution_action, resolved_at
+       FROM sale_issues
+       WHERE issue_id = ?`,
+      [result.insertId]
+    );
+
+    const issue = rows[0];
+    // Log for central sync (entity_type 'sale_issue')
+    await logChange("sale_issue", issue.issue_id, "create", issue);
+
+    return res.status(201).json({ issue });
+  } catch (err) {
+    console.error("POST /api/sales/:id/issues:", err);
+    return res.status(500).json({ message: "Failed to flag issue for sale." });
+  }
+});
+
+// GET /api/sales/:id/issues - admin review of all flags for a sale (from local SQLite)
+router.get("/:id/issues", requireAdmin, async (req, res) => {
+  try {
+    const saleId = parseInt(req.params.id, 10);
+    if (!saleId || Number.isNaN(saleId) || saleId <= 0) {
+      return res.status(400).json({ message: "Invalid sale ID." });
+    }
+
+    if (!hasSaleIssuesTable()) {
+      return res.json({ issues: [] });
+    }
+
+    const [rows] = await pool.query(
+      `SELECT issue_id, sale_id, reason, note, status, cashier_id, cashier_name,
+              created_at, resolved_by_admin_id, resolved_by_admin_name,
+              resolution_note, resolution_action, resolved_at
+       FROM sale_issues
+       WHERE sale_id = ?
+       ORDER BY created_at DESC, issue_id DESC`,
+      [saleId]
+    );
+
+    return res.json({ issues: rows || [] });
+  } catch (err) {
+    console.error("GET /api/sales/:id/issues:", err);
+    return res.status(500).json({ message: "Failed to load sale issues." });
+  }
+});
+
+// PUT /api/sales/:id/issues/:issueId - admin resolves/updates a flagged issue (stored locally + synced)
+router.put("/:id/issues/:issueId", requireAdmin, async (req, res) => {
+  try {
+    const saleId = parseInt(req.params.id, 10);
+    const issueId = parseInt(req.params.issueId, 10);
+    if (!saleId || Number.isNaN(saleId) || saleId <= 0) {
+      return res.status(400).json({ message: "Invalid sale ID." });
+    }
+    if (!issueId || Number.isNaN(issueId) || issueId <= 0) {
+      return res.status(400).json({ message: "Invalid issue ID." });
+    }
+
+    if (!hasSaleIssuesTable()) {
+      return res.status(400).json({ message: "Issue tracking is not configured in the local database." });
+    }
+
+    const { resolution_note, resolution_action, status } = req.body || {};
+    const trimmedNote = typeof resolution_note === "string" ? resolution_note.trim() : "";
+    if (!trimmedNote) {
+      return res.status(400).json({ message: "Resolution note is required." });
+    }
+    if (trimmedNote.length > 4000) {
+      return res.status(400).json({ message: "Resolution note must be 4000 characters or fewer." });
+    }
+
+    const allowedActions = ["resolved", "edit", "void", "refund", "other"];
+    const action =
+      typeof resolution_action === "string" && allowedActions.includes(resolution_action)
+        ? resolution_action
+        : "resolved";
+
+    let newStatus = "resolved";
+    if (status === "voided" || action === "void") newStatus = "voided";
+    else if (status === "refunded" || action === "refund") newStatus = "refunded";
+
+    const [issues] = await pool.query(
+      "SELECT issue_id, sale_id, status FROM sale_issues WHERE issue_id = ? AND sale_id = ?",
+      [issueId, saleId]
+    );
+    if (!issues || issues.length === 0) {
+      return res.status(404).json({ message: "Issue not found for this sale." });
+    }
+
+    // Resolve issue using the authenticated admin's identity from the token
+    const adminId =
+      req.user?.id ??
+      req.user?.userId ??
+      req.user?.user_id ??
+      null;
+    const adminName = req.user?.name || req.user?.username || null;
+
+    await pool.query(
+      `UPDATE sale_issues
+       SET status = ?, resolution_note = ?, resolution_action = ?, 
+           resolved_by_admin_id = ?, resolved_by_admin_name = ?, resolved_at = datetime('now','localtime')
+       WHERE issue_id = ?`,
+      [
+        newStatus,
+        trimmedNote,
+        action,
+        adminId,
+        adminName,
+        issueId,
+      ]
+    );
+
+    const [rows] = await pool.query(
+      `SELECT issue_id, sale_id, reason, note, status, cashier_id, cashier_name,
+              created_at, resolved_by_admin_id, resolved_by_admin_name,
+              resolution_note, resolution_action, resolved_at
+       FROM sale_issues
+       WHERE issue_id = ?`,
+      [issueId]
+    );
+
+    const issue = rows[0];
+    await logChange("sale_issue", issue.issue_id, "update", issue);
+
+    return res.json({ issue });
+  } catch (err) {
+    console.error("PUT /api/sales/:id/issues/:issueId:", err);
+    return res.status(500).json({ message: "Failed to update sale issue." });
   }
 });
 
@@ -424,6 +728,15 @@ router.post("/:id/payments", async (req, res) => {
     } catch (_) {}
 
     await conn.commit();
+
+    // Log payment change for sync
+    await logChange("payment", saleId, "create", {
+      sale_id: saleId,
+      amount_paid: amountRounded,
+      payment_method: payMethod,
+      reference_number: paymentRef,
+    });
+
     return res.json({ message: "Payment recorded successfully." });
   } catch (err) {
     await conn.rollback();

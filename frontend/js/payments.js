@@ -1,8 +1,5 @@
 
-const API_ORIGIN =
-  window.location.port === "5500"
-    ? "http://localhost:5000"
-    : window.location.origin;
+import { API_ORIGIN } from "./config.js";
 const PAYMENTS_API = `${API_ORIGIN}/api/sales/payments`;
 const SALES_API = `${API_ORIGIN}/api/sales`;
 
@@ -99,16 +96,15 @@ function renderPaymentsRows(payments) {
     const lastMode = last ? getModeLabel(last.payment_method, last.reference_number) : "—";
     const lastDate = last && last.payment_date ? formatDate(last.payment_date) : "—";
     const count = list.length;
-    const viewDetailsBtn = "<button type=\"button\" class=\"btn btn-link btn-sm p-0 align-baseline\" data-action=\"toggle-details\" data-sale-id=\"" + saleId + "\" aria-expanded=\"false\"><i class=\"bi bi-chevron-down\" aria-hidden=\"true\"></i> View details</button>";
+    const viewDetailsBtn = "<button type=\"button\" class=\"btn btn-outline-secondary btn-sm\" data-action=\"open-payment-details\" data-sale-id=\"" + saleId + "\"><i class=\"bi bi-receipt-cutoff me-1\" aria-hidden=\"true\"></i>Details</button>";
     html += "<tr data-payment-row data-sale-id=\"" + saleId + "\">";
     html += "<td>" + escapeHtml(String(saleId)) + "</td>";
-    html += "<td class=\"small\">" + count + " payment" + (count !== 1 ? "s" : "") + " " + viewDetailsBtn + "</td>";
+    html += "<td class=\"small\">" + count + " payment" + (count !== 1 ? "s" : "") + "</td>";
     html += "<td class=\"text-end text-nowrap payments-amount-col\">₱" + totalPaid.toFixed(2) + "</td>";
     html += "<td class=\"payments-date-col\">" + escapeHtml(lastDate) + "</td>";
     html += "<td>" + escapeHtml(lastMode) + "</td>";
-    html += "<td></td>";
+    html += "<td class=\"text-end\">" + viewDetailsBtn + "</td>";
     html += "</tr>";
-    html += "<tr data-detail-row data-for-sale-id=\"" + saleId + "\" class=\"d-none\"><td colspan=\"6\" class=\"bg-light pt-2 pb-3 px-3\"></td></tr>";
   });
   tbody.innerHTML = html;
 }
@@ -177,25 +173,21 @@ document.addEventListener("input", function (e) {
 });
 
 document.addEventListener("click", function (e) {
-  const toggleBtn = e.target.closest("[data-action='toggle-details'][data-sale-id]");
-  if (toggleBtn) {
+  const detailsBtn = e.target.closest("[data-action='open-payment-details'][data-sale-id]");
+  if (detailsBtn) {
     e.preventDefault();
-    const saleId = toggleBtn.getAttribute("data-sale-id");
-    const detailRow = document.querySelector("tr[data-detail-row][data-for-sale-id=\"" + saleId + "\"]");
-    if (!detailRow) return;
-    const td = detailRow.querySelector("td");
-    const isExpanded = !detailRow.classList.contains("d-none");
-    if (isExpanded) {
-      detailRow.classList.add("d-none");
-      if (td) td.innerHTML = "";
-      toggleBtn.innerHTML = "<i class=\"bi bi-chevron-down\" aria-hidden=\"true\"></i> View details";
-      toggleBtn.setAttribute("aria-expanded", "false");
-    } else {
-      if (td) td.innerHTML = buildSalePaymentDetailsHtml(Number(saleId));
-      detailRow.classList.remove("d-none");
-      toggleBtn.innerHTML = "<i class=\"bi bi-chevron-up\" aria-hidden=\"true\"></i> Hide details";
-      toggleBtn.setAttribute("aria-expanded", "true");
-    }
+    const saleId = Number(detailsBtn.getAttribute("data-sale-id") || "0");
+    if (!saleId) return;
+    const modalEl = document.getElementById("paymentDetailsModal");
+    const bodyEl = document.getElementById("payment-details-body");
+    const titleEl = document.getElementById("paymentDetailsModalLabel");
+    if (!modalEl || !bodyEl || !titleEl) return;
+
+    titleEl.textContent = "Payment details for Sale #" + saleId;
+    bodyEl.innerHTML = buildSalePaymentDetailsHtml(saleId);
+
+    const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+    modal.show();
     return;
   }
   if (e.target.closest("#btn-payments-search")) {
@@ -261,7 +253,7 @@ function openRecordPaymentModalFromParams() {
   if (receivedInput) receivedInput.value = "0.00";
   updateRecordPaymentChange();
   resetRecordPaymentModalState();
-  // Delay so modal opens after page is visible (page-loading removed by dashboard.js)
+  
   setTimeout(function () {
     var modal = new bootstrap.Modal(modalEl);
     modal.show();

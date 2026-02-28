@@ -34,8 +34,27 @@
 
       <div class="card border-0 shadow-sm">
         <div class="card-body">
-          <div class="table-responsive">
-            <table class="table table-sm align-middle mb-0">
+          <div class="view-toggle-bar">
+            <div class="view-toggle-label">
+              <i class="bi bi-layout-sidebar-inset"></i>
+              View
+            </div>
+            <div class="btn-group btn-group-sm view-toggle-group" role="group" aria-label="Users view" data-view-target="users">
+              <button type="button" class="btn btn-outline-secondary view-toggle-btn active" data-view="table">
+                <i class="bi bi-table"></i><span class="d-none d-sm-inline ms-1">Table</span>
+              </button>
+              <button type="button" class="btn btn-outline-secondary view-toggle-btn" data-view="card">
+                <i class="bi bi-grid-3x3-gap"></i><span class="d-none d-sm-inline ms-1">Card</span>
+              </button>
+              <button type="button" class="btn btn-outline-secondary view-toggle-btn" data-view="kanban">
+                <i class="bi bi-layout-three-columns"></i><span class="d-none d-sm-inline ms-1">Kanban</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="data-view-section" data-view-id="users">
+            <div class="table-responsive data-view-table-wrap">
+              <table class="table table-sm align-middle mb-0" data-kanban-header="Role">
               <thead>
                 <tr>
                   <th>Name</th>
@@ -47,13 +66,16 @@
                 </tr>
               </thead>
               <tbody id="users-table-body">
-                <tr>
+                <tr data-view-placeholder="true">
                   <td colspan="6" class="text-muted small">
                     Loading users...
                   </td>
                 </tr>
               </tbody>
-            </table>
+              </table>
+            </div>
+            <div class="data-view-cards data-card-grid"></div>
+            <div class="data-view-kanban"></div>
           </div>
         </div>
       </div>
@@ -204,6 +226,7 @@
     <script src="/js/bootstrap.bundle.min.js"></script>
     <script src="/js/app-navigation.js"></script>
     <script src="/js/modal-draggable.js"></script>
+    <script src="../js/view-toggle.js"></script>
     <script src="/js/dashboard.js" type="module"></script>
     <script src="/js/users.js" type="module"></script>
     <script src="/js/products.js" type="module"></script>

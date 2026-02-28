@@ -1,6 +1,7 @@
 import express from "express";
 import pool from "../db.js";
 import { authenticateToken } from "../middleware/authMiddleware.js";
+import { logChange } from "../changeLog.js";
 
 const SQLITE_NOW = "datetime('now','localtime')";
 const SQLITE_CURDATE = "date('now','localtime')";
@@ -89,11 +90,23 @@ router.post("/", async (req, res) => {
     const categoryStr = (category && typeof category === "string") ? category.trim() : null;
     const supId = supplier_id != null && supplier_id !== "" ? parseInt(supplier_id, 10) : null;
     const supPrice = supplier_price != null && supplier_price !== "" ? parseFloat(supplier_price) : 0;
+    const finalSupId = isNaN(supId) ? null : supId;
+
+    const [existing] = await pool.query(
+      "SELECT product_id AS id FROM products WHERE TRIM(name) = TRIM(?) AND ((category IS NULL AND ? IS NULL) OR (category = ?)) AND ((supplier_id IS NULL AND ? IS NULL) OR (supplier_id = ?)) LIMIT 1",
+      [name.trim(), categoryStr, categoryStr, finalSupId, finalSupId]
+    );
+    if (existing.length > 0) {
+      return res.status(409).json({
+        message: "A product with this name, category and supplier already exists. Edit the existing product instead.",
+        existingId: existing[0].id,
+      });
+    }
 
     const recordedBy = req.user?.userId ?? null;
     const [insertResult] = await pool.query(
       "INSERT INTO products (name, category, supplier_id, supplier_price, selling_price, stock_quantity, recorded_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      [name.trim(), categoryStr || null, isNaN(supId) ? null : supId, supPrice, price, stock, recordedBy]
+      [name.trim(), categoryStr || null, finalSupId, supPrice, price, stock, recordedBy]
     );
     const newId = insertResult?.insertId;
     const [rows] = await pool.query(
@@ -116,6 +129,8 @@ router.post("/", async (req, res) => {
         ]
       );
     } catch (_) {}
+
+    await logChange("product", product.id, "create", product);
 
     return res.status(201).json({ product });
   } catch (err) {
@@ -158,10 +173,22 @@ router.put("/:id", async (req, res) => {
     const categoryStr = (category && typeof category === "string") ? category.trim() : null;
     const supId = supplier_id != null && supplier_id !== "" ? parseInt(supplier_id, 10) : null;
     const supPrice = supplier_price != null && supplier_price !== "" ? parseFloat(supplier_price) : 0;
+    const finalSupId = isNaN(supId) ? null : supId;
+
+    const [existing] = await pool.query(
+      "SELECT product_id AS id FROM products WHERE TRIM(name) = TRIM(?) AND ((category IS NULL AND ? IS NULL) OR (category = ?)) AND ((supplier_id IS NULL AND ? IS NULL) OR (supplier_id = ?)) AND product_id != ? LIMIT 1",
+      [name.trim(), categoryStr, categoryStr, finalSupId, finalSupId, id]
+    );
+    if (existing.length > 0) {
+      return res.status(409).json({
+        message: "A product with this name, category and supplier already exists.",
+        existingId: existing[0].id,
+      });
+    }
 
     await pool.query(
       "UPDATE products SET name = ?, category = ?, supplier_id = ?, supplier_price = ?, selling_price = ?, stock_quantity = ? WHERE product_id = ?",
-      [name.trim(), categoryStr || null, isNaN(supId) ? null : supId, supPrice, price, stock, id]
+      [name.trim(), categoryStr || null, finalSupId, supPrice, price, stock, id]
     );
     const [rows] = await pool.query(
       `SELECT p.product_id AS id, p.name, p.category, p.supplier_id, p.supplier_price, p.selling_price, p.stock_quantity,
@@ -169,7 +196,11 @@ router.put("/:id", async (req, res) => {
        FROM products p LEFT JOIN suppliers s ON s.supplier_id = p.supplier_id LEFT JOIN users u ON u.user_id = p.recorded_by WHERE p.product_id = ?`,
       [id]
     );
-    return res.json({ product: rows[0] });
+    const product = rows[0];
+
+    await logChange("product", product.id, "update", product);
+
+    return res.json({ product });
   } catch (err) {
     console.error("PUT /api/products/:id:", err);
     return res.status(500).json({ message: "Failed to update product." });

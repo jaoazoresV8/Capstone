@@ -1,8 +1,4 @@
-
-const API_ORIGIN =
-  !window.location.port || window.location.port === "5500" || window.location.port === "3000"
-    ? "http://localhost:5000"
-    : window.location.origin;
+import { API_ORIGIN } from "./config.js";
 
 const API_BASE = `${API_ORIGIN}/api/auth`;
 

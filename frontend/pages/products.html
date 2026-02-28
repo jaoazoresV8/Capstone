@@ -52,7 +52,24 @@
 
       <div class="card border-0 shadow-sm">
         <div class="card-body">
-         
+          <div class="view-toggle-bar">
+            <div class="view-toggle-label">
+              <i class="bi bi-layout-sidebar-inset"></i>
+              View
+            </div>
+            <div class="btn-group btn-group-sm view-toggle-group" role="group" aria-label="Products view" data-view-target="products">
+              <button type="button" class="btn btn-outline-secondary view-toggle-btn active" data-view="table">
+                <i class="bi bi-table"></i><span class="d-none d-sm-inline ms-1">Table</span>
+              </button>
+              <button type="button" class="btn btn-outline-secondary view-toggle-btn" data-view="card">
+                <i class="bi bi-grid-3x3-gap"></i><span class="d-none d-sm-inline ms-1">Card</span>
+              </button>
+              <button type="button" class="btn btn-outline-secondary view-toggle-btn" data-view="kanban">
+                <i class="bi bi-layout-three-columns"></i><span class="d-none d-sm-inline ms-1">Kanban</span>
+              </button>
+            </div>
+          </div>
+
           <div class="products-filter-bar">
             <div class="search-wrap input-group input-group-sm">
               <span class="input-group-text bg-white"><i class="bi bi-search text-muted"></i></span>
@@ -75,8 +92,9 @@
             </button>
           </div>
 
-          <div class="table-responsive" id="products-table-wrap">
-            <table class="table table-sm align-middle mb-0">
+          <div class="data-view-section" data-view-id="products">
+            <div class="table-responsive data-view-table-wrap" id="products-table-wrap">
+              <table class="table table-sm align-middle mb-0" data-kanban-header="Category">
               <thead>
                 <tr>
                   <th>Name</th>
@@ -88,11 +106,14 @@
                 </tr>
               </thead>
               <tbody id="products-tbody">
-                <tr>
+                <tr data-view-placeholder="true">
                   <td colspan="6" class="text-muted small">Loading products…</td>
                 </tr>
               </tbody>
-            </table>
+              </table>
+            </div>
+            <div class="data-view-cards data-card-grid"></div>
+            <div class="data-view-kanban"></div>
           </div>
           <div id="products-load-more" class="text-center py-2 small text-muted d-none"></div>
         </div>
@@ -115,7 +136,37 @@
               </div>
               <div class="mb-3">
                 <label class="form-label">Category</label>
-                <input type="text" class="form-control" id="product-category" placeholder="e.g. Cement" />
+                <div class="d-flex flex-wrap align-items-center gap-2">
+                  <select class="form-select" id="product-category">
+                    <option value="">Select category…</option>
+                  </select>
+                  <div class="btn-group btn-group-sm" role="group" data-admin-only="true">
+                    <button
+                      type="button"
+                      class="btn btn-outline-secondary"
+                      id="btn-product-add-category"
+                      title="Add category (admin only)"
+                    >
+                      <i class="bi bi-plus-lg"></i>
+                    </button>
+                    <button
+                      type="button"
+                      class="btn btn-outline-secondary"
+                      id="btn-product-edit-category"
+                      title="Rename category (admin only)"
+                    >
+                      <i class="bi bi-pencil-square"></i>
+                    </button>
+                    <button
+                      type="button"
+                      class="btn btn-outline-secondary"
+                      id="btn-product-archive-category"
+                      title="Archive category (admin only)"
+                    >
+                      <i class="bi bi-archive"></i>
+                    </button>
+                  </div>
+                </div>
               </div>
               <div class="mb-3">
                 <label class="form-label">Supplier name</label>
@@ -201,6 +252,7 @@
     <script src="/js/bootstrap.bundle.min.js"></script>
     <script src="/js/app-navigation.js"></script>
     <script src="/js/modal-draggable.js"></script>
+    <script src="../js/view-toggle.js"></script>
     <script src="/js/dashboard.js" type="module"></script>
     <script src="/js/products.js" type="module"></script>
   </body>

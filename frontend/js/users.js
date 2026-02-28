@@ -1,7 +1,4 @@
-const API_ORIGIN =
-  window.location.port === "5500"
-    ? "http://localhost:5000"
-    : window.location.origin;
+import { API_ORIGIN } from "./config.js";
 
 const USERS_BASE = `${API_ORIGIN}/api/users`;
 
@@ -98,17 +95,7 @@ const clearAlert = () => {
   alertBox.className = "alert alert-info py-2 small d-none";
 };
 
-const canAccessPage = () => {
-  const raw = localStorage.getItem("sm_user");
-  if (!raw) return false;
-  try {
-    const user = JSON.parse(raw);
-    return user.role === "admin";
-  } catch {
-    return false;
-  }
-};
-
+// Current logged-in user id (for disabling self-delete)
 const getCurrentUserId = () => {
   const raw = localStorage.getItem("sm_user");
   if (!raw) return null;
@@ -119,6 +106,8 @@ const getCurrentUserId = () => {
     return null;
   }
 };
+
+let usersInitialized = false;
 
 const loadUsers = async () => {
   const token = localStorage.getItem("sm_token");
@@ -154,8 +143,10 @@ const loadUsers = async () => {
           const allowed = Array.isArray(u.allowed_pages) ? u.allowed_pages.join(",") : "";
           const isSelf = currentUserId != null && String(u.id) === currentUserId;
           const deleteBtn = isSelf
-            ? ''
-            : ` <button class="btn btn-outline-danger btn-sm" data-action="delete" data-id="${u.id}" data-name="${escapeAttr(u.name)}" title="Delete user">Delete</button>`;
+            ? ""
+            : ` <button class="btn btn-outline-danger btn-sm" data-action="delete" data-id="${u.id}" data-name="${escapeAttr(
+                u.name,
+              )}" title="Delete user">Delete</button>`;
           return `
       <tr data-id="${u.id}" data-allowed-pages="${allowed}">
         <td>${escapeHtml(u.name)}</td>
@@ -164,7 +155,7 @@ const loadUsers = async () => {
         <td class="text-capitalize">${escapeHtml(u.role)}</td>
         <td>${u.created_at ? new Date(u.created_at).toLocaleDateString() : ""}</td>
         <td class="text-end">
-          <button class="btn btn-outline-secondary btn-sm me-1" data-action="edit">Edit</button>${deleteBtn}
+          <button class="btn btn-outline-secondary btn-sm me-1" data-action="edit" data-id="${u.id}">Edit</button>${deleteBtn}
         </td>
       </tr>
     `;
@@ -252,26 +243,33 @@ async function performDeleteUser() {
   }
 }
 
-if (tableBody) {
-  tableBody.addEventListener("click", (e) => {
-    const deleteBtn = e.target.closest("button[data-action='delete']");
-    if (deleteBtn) {
-      const id = deleteBtn.dataset.id;
-      const name = deleteBtn.dataset.name || "this user";
-      if (!id) return;
-      openDeleteUserModal(id, name);
-      return;
-    }
-    const btn = e.target.closest("button[data-action='edit']");
-    if (!btn) return;
-    const row = btn.closest("tr");
+document.addEventListener("click", (e) => {
+  if (!document.body || document.body.dataset.page !== "users") return;
+
+  const deleteBtn = e.target.closest("button[data-action='delete'][data-id]");
+  if (deleteBtn) {
+    const id = deleteBtn.dataset.id;
+    const name = deleteBtn.dataset.name || "this user";
+    if (!id) return;
+    openDeleteUserModal(id, name);
+    return;
+  }
+
+  const editBtn = e.target.closest("button[data-action='edit'][data-id]");
+  if (editBtn) {
+    const id = editBtn.dataset.id;
+    if (!id || !tableBody) return;
+    const row =
+      tableBody.querySelector(`tr[data-id="${id}"]`) ||
+      Array.from(tableBody.querySelectorAll("tr[data-id]")).find((tr) => tr.dataset.id === id);
+    if (!row) return;
     openEditModal(row);
     if (!bootstrapModal) {
       bootstrapModal = new bootstrap.Modal(modalEl);
     }
     bootstrapModal.show();
-  });
-}
+  }
+});
 
 if (deleteUserTypingEl) {
   deleteUserTypingEl.addEventListener("input", () => {
@@ -387,16 +385,40 @@ if (userForm) {
   });
 }
 
-/* Run auth check immediately so we redirect before paint (no flicker) */
-if (!canAccessPage()) {
-  window.location.replace("./dashboard.html");
-} else if (document.body) {
-  // Admins can see the page immediately without extra fade/jump
+function initUsersPage() {
+  if (!document.body || document.body.dataset.page !== "users") return;
+  if (usersInitialized) return;
+  usersInitialized = true;
+  loadUsers();
+}
+
+// When landing directly on users.html, remove auth-pending/page-loading so content is visible
+if (document.body) {
   document.body.classList.remove("auth-pending");
   document.body.classList.remove("page-loading");
 }
 
-window.addEventListener("DOMContentLoaded", () => {
-  if (!canAccessPage()) return;
-  loadUsers();
+// Initial load (direct visit)
+window.addEventListener("DOMContentLoaded", initUsersPage);
+
+// Re-run when navigating via PJAX
+window.addEventListener("pjax:complete", function (e) {
+  if (e && e.detail && e.detail.page === "users") {
+    initUsersPage();
+  }
 });
+
+// If this script is loaded dynamically after DOM is ready and we're already on users page
+initUsersPage();
+
+// Fallback: if page flag is set slightly later, poll briefly and init once
+let usersInitPollCount = 0;
+const usersInitPoll = setInterval(() => {
+  if (usersInitialized || usersInitPollCount++ > 10) {
+    clearInterval(usersInitPoll);
+    return;
+  }
+  if (document.body && document.body.dataset.page === "users") {
+    initUsersPage();
+  }
+}, 200);

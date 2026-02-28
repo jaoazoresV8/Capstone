@@ -1,5 +1,0 @@
-directories:
-  output: dist-new
-  buildResources: build
-files: []
-electronVersion: 33.4.11

@@ -1,4 +1,4 @@
-# PowerShell script to analyze Electron app size
+
 
 $unpackedPath = "dist\win-unpacked"
 $asarPath = "$unpackedPath\resources\app.asar"

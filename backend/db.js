@@ -21,6 +21,67 @@ const db = new Database(dbPath);
 // Enable foreign keys
 db.pragma("foreign_keys = ON");
 
+// Robustness + multi-client performance (single server process, many HTTP clients)
+try {
+  db.pragma("journal_mode = WAL");
+} catch (e) {
+  console.warn("[db] Failed to enable WAL mode:", e?.message || e);
+}
+try {
+  // FULL prioritizes durability (no data loss after COMMIT), at the cost of a bit of speed.
+  db.pragma("synchronous = FULL");
+} catch (e) {
+  console.warn("[db] Failed to set synchronous pragma:", e?.message || e);
+}
+try {
+  db.pragma("busy_timeout = 5000");
+} catch (e) {
+  console.warn("[db] Failed to set busy_timeout pragma:", e?.message || e);
+}
+try {
+  db.pragma("temp_store = MEMORY");
+  db.pragma("cache_size = -20000");
+} catch (_) {}
+
+function ensureChangeLog() {
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS change_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        entity_type TEXT NOT NULL,
+        entity_id INTEGER NOT NULL,
+        operation TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_change_log_id ON change_log(id);
+      CREATE INDEX IF NOT EXISTS idx_change_log_entity ON change_log(entity_type, entity_id);
+    `);
+  } catch (e) {
+    console.warn("[db] Failed to ensure change_log:", e?.message || e);
+  }
+}
+
+function ensureIdempotencyKeys() {
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS idempotency_keys (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        idem_key TEXT NOT NULL,
+        method TEXT NOT NULL,
+        path TEXT NOT NULL,
+        response_status INTEGER NOT NULL,
+        response_body TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+        UNIQUE(idem_key, method, path)
+      );
+      CREATE INDEX IF NOT EXISTS idx_idem_created_at ON idempotency_keys(created_at DESC);
+    `);
+  } catch (e) {
+    console.warn("[db] Failed to ensure idempotency_keys:", e?.message || e);
+  }
+}
+
 // Auto-initialize of schema
 const tableCount = db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE type='table'").get();
 if (tableCount.n === 0) {
@@ -29,6 +90,8 @@ if (tableCount.n === 0) {
     const schema = fs.readFileSync(schemaPath, "utf8");
     db.exec(schema);
   }
+  ensureChangeLog();
+  ensureIdempotencyKeys();
 } else {
   try {
     db.exec("ALTER TABLE users ADD COLUMN allowed_pages TEXT");
@@ -65,6 +128,37 @@ if (tableCount.n === 0) {
   } catch (e) {
     if (e && !/already exists/i.test(String(e.message))) console.warn("[db] Migration activity_log:", e.message);
   }
+
+  // Ensure local sale_issues table exists for offline flagging of sale issues
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS sale_issues (
+        issue_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sale_id INTEGER NOT NULL,
+        reason TEXT NOT NULL,
+        note TEXT,
+        status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','resolved','voided','refunded')),
+        cashier_id INTEGER NOT NULL,
+        cashier_name TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+        resolved_by_admin_id INTEGER,
+        resolved_by_admin_name TEXT,
+        resolution_note TEXT,
+        resolution_action TEXT,
+        resolved_at TEXT,
+        FOREIGN KEY (sale_id) REFERENCES sales(sale_id),
+        FOREIGN KEY (cashier_id) REFERENCES users(user_id),
+        FOREIGN KEY (resolved_by_admin_id) REFERENCES users(user_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_sale_issues_sale_status ON sale_issues(sale_id, status);
+      CREATE INDEX IF NOT EXISTS idx_sale_issues_created_at ON sale_issues(created_at DESC);
+    `);
+  } catch (e) {
+    console.warn("[db] Failed to ensure sale_issues:", e?.message || e);
+  }
+
+  ensureChangeLog();
+  ensureIdempotencyKeys();
 }
 
 
@@ -127,6 +221,8 @@ const ALLOWED_TABLES = new Set([
   "settings",
   "password_reset_requests",
   "activity_log",
+  "change_log",
+  "sale_issues",
 ]);
 
 
@@ -155,7 +251,7 @@ const pool = {
         return Promise.resolve(runQuery(db, sql, params));
       },
       beginTransaction() {
-        db.exec("BEGIN");
+        db.exec("BEGIN IMMEDIATE");
         return Promise.resolve();
       },
       commit() {

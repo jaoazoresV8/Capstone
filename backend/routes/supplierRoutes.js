@@ -1,6 +1,7 @@
 import express from "express";
 import pool from "../db.js";
 import { authenticateToken } from "../middleware/authMiddleware.js";
+import { logChange } from "../changeLog.js";
 
 const router = express.Router();
 router.use(authenticateToken);
@@ -63,7 +64,12 @@ router.post("/", async (req, res) => {
       "SELECT supplier_id AS id, name, contact, address FROM suppliers WHERE supplier_id = ?",
       [result.insertId]
     );
-    return res.status(201).json({ supplier: rows[0] });
+    const supplier = rows[0];
+
+    // Log local change for later central sync
+    await logChange("supplier", supplier.id, "create", supplier);
+
+    return res.status(201).json({ supplier });
   } catch (err) {
     console.error("POST /api/suppliers:", err);
     return res.status(500).json({ message: "Failed to create supplier." });
@@ -93,7 +99,11 @@ router.put("/:id", async (req, res) => {
       "SELECT supplier_id AS id, name, contact, address FROM suppliers WHERE supplier_id = ?",
       [id]
     );
-    return res.json({ supplier: rows[0] });
+    const supplier = rows[0];
+
+    await logChange("supplier", supplier.id, "update", supplier);
+
+    return res.json({ supplier });
   } catch (err) {
     console.error("PUT /api/suppliers/:id:", err);
     return res.status(500).json({ message: "Failed to update supplier." });

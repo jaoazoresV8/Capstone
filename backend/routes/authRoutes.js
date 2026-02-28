@@ -4,6 +4,7 @@ import jwt from "jsonwebtoken";
 
 import pool from "../db.js";
 import { authenticateToken } from "../middleware/authMiddleware.js";
+import { createRateLimit } from "../middleware/rateLimit.js";
 
 const router = express.Router();
 
@@ -69,6 +70,9 @@ const signToken = (user) => {
   );
 };
 
+// Limit login + forgot-password attempts per IP to reduce brute-force.
+const loginLimiter = createRateLimit({ windowMs: 60_000, max: 10 });
+const forgotLimiter = createRateLimit({ windowMs: 60_000, max: 5 });
 
 router.post("/register", async (req, res) => {
   try {
@@ -139,7 +143,7 @@ router.post("/register", async (req, res) => {
 });
 
 
-router.post("/login", (req, res, next) => {
+router.post("/login", loginLimiter, (req, res, next) => {
   const run = async () => {
     try {
       const body = req.body ?? {};
@@ -243,7 +247,7 @@ router.post("/login", (req, res, next) => {
 });
 
 
-router.post("/forgot-password", async (req, res) => {
+router.post("/forgot-password", forgotLimiter, async (req, res) => {
   try {
     const username = (req.body?.username || "").toString().trim();
     if (!username) {

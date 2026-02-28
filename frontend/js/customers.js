@@ -1,10 +1,7 @@
 /**
  * Customers page: list customers with search and filter functionality
  */
-const API_ORIGIN =
-  window.location.port === "5500"
-    ? "http://localhost:5000"
-    : window.location.origin;
+import { API_ORIGIN } from "./config.js";
 const CUSTOMERS_API = `${API_ORIGIN}/api/customers`;
 
 function getToken() {
@@ -24,6 +21,150 @@ function escapeHtml(s) {
 
 let allCustomers = []; 
 let lastRenderedCustomers = []; 
+let currentCustomerDetails = null;
+const saleDetailsCache = {};
+let pendingCustomerSaleConfirm = null;
+
+const SALES_API = `${API_ORIGIN}/api/sales`;
+
+function isAdmin() {
+  const raw = localStorage.getItem("sm_user");
+  if (!raw) return false;
+  try {
+    const user = JSON.parse(raw);
+    return !!user && user.role === "admin";
+  } catch {
+    return false;
+  }
+}
+
+async function updateCustomerBasicInfo() {
+  if (!currentCustomerDetails) return;
+  const id = currentCustomerDetails.customer_id || currentCustomerDetails.id;
+  if (!id) return;
+  const nameInput = document.getElementById("customer-detail-name");
+  const contactInput = document.getElementById("customer-detail-contact");
+  const addressInput = document.getElementById("customer-detail-address");
+  const msgEl = document.getElementById("customer-detail-save-msg");
+  const name = nameInput ? nameInput.value.trim() : "";
+  const contact = contactInput ? contactInput.value.trim() : "";
+  const address = addressInput ? addressInput.value.trim() : "";
+  if (!name) {
+    if (msgEl) {
+      msgEl.textContent = "Name is required.";
+      msgEl.className = "small mt-1 text-danger";
+      msgEl.classList.remove("d-none");
+    }
+    return;
+  }
+  try {
+    const res = await fetch(`${CUSTOMERS_API}/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ name, contact, address }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (msgEl) {
+        msgEl.textContent = data.message || "Failed to update customer.";
+        msgEl.className = "small mt-1 text-danger";
+        msgEl.classList.remove("d-none");
+      }
+      return;
+    }
+    currentCustomerDetails.name = name;
+    currentCustomerDetails.contact = contact;
+    currentCustomerDetails.address = address;
+    if (msgEl) {
+      msgEl.textContent = "Customer information updated.";
+      msgEl.className = "small mt-1 text-success";
+      msgEl.classList.remove("d-none");
+    }
+    // Refresh list best-effort
+    loadCustomers({ ...getCustomersParams() });
+  } catch (err) {
+    if (msgEl) {
+      msgEl.textContent = err.message || "Failed to update customer.";
+      msgEl.className = "small mt-1 text-danger";
+      msgEl.classList.remove("d-none");
+    }
+  }
+}
+
+async function ensureAndResolveIssueForSale(saleId, kind) {
+  if (!isAdmin()) return;
+  const kindSafe = kind === "void" ? "void" : kind === "refund" ? "refund" : "resolved";
+  // 1) Load existing issues
+  let issueId = null;
+  try {
+    const res = await fetch(`${SALES_API}/${encodeURIComponent(saleId)}/issues`, {
+      headers: authHeaders(),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && Array.isArray(data.issues)) {
+      const open = data.issues.find((iss) => iss.status === "open");
+      if (open) issueId = open.issue_id;
+    }
+  } catch {
+    // ignore, we'll try to create
+  }
+
+  // 2) If no open issue, create one
+  if (!issueId) {
+    try {
+      const body = {
+        reason: "payment_issue",
+        note: `Auto-created from Customers page to mark sale as ${kindSafe}.`,
+      };
+      const res = await fetch(`${SALES_API}/${encodeURIComponent(saleId)}/issues`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.issue && data.issue.issue_id != null) {
+        issueId = data.issue.issue_id;
+      }
+    } catch {
+      // ignore, best-effort
+    }
+  }
+
+  if (!issueId) {
+    alert("Could not create or find an issue for this sale.");
+    return;
+  }
+
+  // 3) Resolve the issue with the chosen action
+  let status = "resolved";
+  if (kindSafe === "void") status = "voided";
+  else if (kindSafe === "refund") status = "refunded";
+
+  const note = `Marked as ${kindSafe} from Customers page.`;
+
+  try {
+    const res = await fetch(
+      `${SALES_API}/${encodeURIComponent(saleId)}/issues/${encodeURIComponent(issueId)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({
+          resolution_note: note,
+          resolution_action: kindSafe,
+          status,
+        }),
+      }
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      alert(data.message || "Failed to update sale issue.");
+      return;
+    }
+    alert(`Sale #${saleId} marked as ${status}.`);
+  } catch (err) {
+    alert(err.message || "Failed to update sale issue.");
+  }
+}
 
 function getCustomersParams(fromBar) {
   const searchEl = document.getElementById("customer-search");
@@ -114,9 +255,28 @@ function buildDetailsHtml(c) {
   const transactions = (c.transactions || []);
   const hasProducts = products.length > 0;
   const hasTransactions = transactions.length > 0;
-  if (!hasProducts && !hasTransactions) return "<span class=\"text-muted small\">No purchase history.</span>";
-
   let html = '<div class="customer-details-expanded small">';
+
+  // Editable basic info
+  html += '<div class="detail-section mb-3">';
+  html += '<div class="detail-section-title">Customer information</div>';
+  html += '<div class="row g-2 align-items-end">';
+  html += '<div class="col-md-4"><label class="form-label small mb-1">Name</label><input type="text" class="form-control form-control-sm" id="customer-detail-name" value="' + escapeHtml(c.name || "") + '"></div>';
+  html += '<div class="col-md-4"><label class="form-label small mb-1">Contact</label><input type="text" class="form-control form-control-sm" id="customer-detail-contact" value="' + escapeHtml(c.contact || "") + '"></div>';
+  html += '<div class="col-md-4"><label class="form-label small mb-1">Address</label><input type="text" class="form-control form-control-sm" id="customer-detail-address" value="' + escapeHtml(c.address || "") + '"></div>';
+  html += '</div>';
+  html += '<div class="mt-2 d-flex justify-content-between align-items-center">';
+  html += '<small class="text-muted">Changes here will update the Customers list and future sales.</small>';
+  html += '<button type="button" class="btn btn-primary btn-sm" id="btn-customer-detail-save"><i class="bi bi-save"></i> Save changes</button>';
+  html += '</div>';
+  html += '<div id="customer-detail-save-msg" class="small mt-1 text-muted d-none"></div>';
+  html += '</div>';
+
+  if (!hasProducts && !hasTransactions) {
+    html += '<span class="text-muted small">No purchase history.</span>';
+    html += '</div>';
+    return html;
+  }
 
   if (hasProducts) {
     html += '<div class="detail-section">';
@@ -133,12 +293,40 @@ function buildDetailsHtml(c) {
     html += '<div class="detail-section-title">Transaction history</div>';
     transactions.forEach((t) => {
       const dateStr = t.sale_date ? new Date(t.sale_date).toLocaleDateString(undefined, { dateStyle: "short" }) : "—";
+      const rawStatus = (t.status || "").toLowerCase();
+      let statusLabel = "—";
+      let statusClass = "badge bg-secondary-subtle text-secondary";
+      if (rawStatus === "paid") {
+        statusLabel = "Paid";
+        statusClass = "badge bg-success-subtle text-success";
+      } else if (rawStatus === "partial") {
+        statusLabel = "Partial";
+        statusClass = "badge bg-warning-subtle text-warning";
+      } else if (rawStatus === "unpaid") {
+        statusLabel = "Unpaid";
+        statusClass = "badge bg-danger-subtle text-danger";
+      } else if (rawStatus === "voided") {
+        statusLabel = "Void";
+        statusClass = "badge bg-secondary text-light";
+      } else if (rawStatus === "refunded") {
+        statusLabel = "Refunded";
+        statusClass = "badge bg-info-subtle text-info";
+      }
       html += '<div class="transaction-card">';
       html += '<div class="transaction-header">';
       html += `<span class="sale-id">Sale #${escapeHtml(String(t.sale_id))}</span>`;
       html += `<span class="text-muted">${escapeHtml(dateStr)}</span>`;
       html += `<span>Total ₱${Number(t.total_amount || 0).toFixed(2)}</span>`;
       html += `<span>Paid ₱${Number(t.amount_paid || 0).toFixed(2)}</span>`;
+      html += `<span class="ms-2" data-sale-status-label="${t.sale_id}"><span class="${statusClass}">${escapeHtml(statusLabel)}</span></span>`;
+      html += `<span class="ms-2 small text-muted" data-sale-payment-label="${t.sale_id}">Payment: <span class="fw-semibold">—</span></span>`;
+      // Issue actions are only shown when the related sale is flagged (has an open issue).
+      html += `<div class="ms-auto d-flex gap-1 customer-sale-actions d-none" data-sale-id="${t.sale_id}">`;
+      html += `<button type="button" class="btn btn-outline-primary btn-sm" data-action="customer-sale-open" data-sale-id="${t.sale_id}"><i class="bi bi-box-arrow-up-right"></i> Open sale</button>`;
+      html += `<button type="button" class="btn btn-outline-secondary btn-sm" data-action="customer-sale-mark" data-kind="resolved" data-sale-id="${t.sale_id}">Mark resolved</button>`;
+      html += `<button type="button" class="btn btn-outline-warning btn-sm" data-action="customer-sale-mark" data-kind="refund" data-sale-id="${t.sale_id}">Mark refunded</button>`;
+      html += `<button type="button" class="btn btn-outline-danger btn-sm" data-action="customer-sale-mark" data-kind="void" data-sale-id="${t.sale_id}">Mark void</button>`;
+      html += '</div>';
       html += '</div>';
       if ((t.items || []).length > 0) {
         html += '<table class="transaction-items"><tbody>';
@@ -153,6 +341,102 @@ function buildDetailsHtml(c) {
   }
   html += '</div>';
   return html;
+}
+
+async function updateCustomerSaleIssueButtons(container) {
+  const root = container || document;
+  const groups = Array.from(root.querySelectorAll(".customer-sale-actions[data-sale-id]"));
+  if (!groups.length) return;
+
+  for (const group of groups) {
+    const saleId = group.getAttribute("data-sale-id");
+    if (!saleId) continue;
+    try {
+      const res = await fetch(`${SALES_API}/${encodeURIComponent(saleId)}`, {
+        headers: authHeaders(),
+      });
+      const data = await res.json().catch(() => ({}));
+      const sale = data.sale || {};
+      saleDetailsCache[saleId] = sale;
+      const hasOpenIssue = res.ok && sale.has_open_issue;
+      if (hasOpenIssue) {
+        group.classList.remove("d-none");
+      } else {
+        group.classList.add("d-none");
+      }
+
+      const statusEl = root.querySelector(`[data-sale-status-label="${saleId}"]`);
+      if (statusEl && sale.status) {
+        const raw = String(sale.status).toLowerCase();
+        let label = sale.status;
+        let cls = "badge bg-secondary-subtle text-secondary";
+        if (raw === "paid") {
+          label = "Paid";
+          cls = "badge bg-success-subtle text-success";
+        } else if (raw === "partial") {
+          label = "Partial";
+          cls = "badge bg-warning-subtle text-warning";
+        } else if (raw === "unpaid") {
+          label = "Unpaid";
+          cls = "badge bg-danger-subtle text-danger";
+        } else if (raw === "voided") {
+          label = "Void";
+          cls = "badge bg-secondary text-light";
+        } else if (raw === "refunded") {
+          label = "Refunded";
+          cls = "badge bg-info-subtle text-info";
+        }
+        statusEl.innerHTML = `<span class="${cls}">${escapeHtml(label)}</span>`;
+      }
+
+      const paymentWrap = root.querySelector(`[data-sale-payment-label="${saleId}"]`);
+      if (paymentWrap) {
+        const inner = paymentWrap.querySelector("span.fw-semibold") || paymentWrap;
+        let pm = sale.payment_method || "";
+        let pmLabel;
+        const pmLower = String(pm).toLowerCase();
+        if (pmLower === "cash") pmLabel = "Cash";
+        else if (pmLower === "gcash") pmLabel = "GCash";
+        else if (pmLower === "paymaya") pmLabel = "PayMaya";
+        else if (pmLower === "credit") pmLabel = "Credit";
+        else pmLabel = pm || "—";
+        inner.textContent = pmLabel;
+      }
+    } catch {
+      // On error, keep actions hidden.
+      group.classList.add("d-none");
+    }
+  }
+}
+
+function openCustomerSaleConfirmModal(saleId, kind) {
+  const modalEl = document.getElementById("customerSaleConfirmModal");
+  if (!modalEl) return;
+  const actionLabelEl = document.getElementById("customer-sale-confirm-action-label");
+  const saleLabelEl = document.getElementById("customer-sale-confirm-sale-label");
+  const paymentEl = document.getElementById("customer-sale-confirm-payment");
+  let actionLabel = "update this sale";
+  if (kind === "resolved") actionLabel = "mark this issue as resolved";
+  else if (kind === "refund") actionLabel = "mark this issue as refunded";
+  else if (kind === "void") actionLabel = "mark this issue as void";
+  if (actionLabelEl) actionLabelEl.textContent = actionLabel;
+  if (saleLabelEl) saleLabelEl.textContent = `Sale #${saleId}`;
+  const cached = saleDetailsCache[saleId];
+  if (paymentEl) {
+    let pmLabel = "—";
+    if (cached && cached.payment_method) {
+      const pmLower = String(cached.payment_method).toLowerCase();
+      if (pmLower === "cash") pmLabel = "Cash";
+      else if (pmLower === "gcash") pmLabel = "GCash";
+      else if (pmLower === "paymaya") pmLabel = "PayMaya";
+      else if (pmLower === "credit") pmLabel = "Credit";
+      else pmLabel = cached.payment_method;
+    }
+    paymentEl.textContent = pmLabel;
+  }
+  pendingCustomerSaleConfirm = { saleId, kind };
+  const m = new bootstrap.Modal(modalEl);
+  m.show();
 }
 
 function renderCustomers(customers) {
@@ -171,9 +455,6 @@ function renderCustomers(customers) {
       (c, i) => {
         const summary = c.products_bought || "—";
         const hasDetails = ((c.products_detail && c.products_detail.length) || (c.transactions && c.transactions.length));
-        const btn = hasDetails
-          ? `<button type="button" class="btn btn-link btn-sm p-0 ms-1 align-baseline" data-action="toggle-details" data-index="${i}" aria-expanded="false"><i class="bi bi-chevron-down" aria-hidden="true"></i> View details</button>`
-          : "";
         const rowClass = hasBalance(c) ? " customer-with-balance" : "";
         const bal = balance(c);
         const firstUnpaid = (c.transactions || []).find((t) => Number(t.remaining_balance || 0) > 0);
@@ -181,19 +462,22 @@ function renderCustomers(customers) {
         const saleBalance = firstUnpaid ? Number(firstUnpaid.remaining_balance || 0) : bal;
         const payParams = new URLSearchParams({ pay: "1", customerId: String(c.customer_id || c.id || ""), customerName: (c.name || "").trim(), balance: String(saleBalance) });
         if (saleId) payParams.set("saleId", String(saleId));
+        const detailsBtn = hasDetails
+          ? `<button type="button" class="btn btn-outline-secondary btn-sm me-1" data-action="view-customer-details" data-index="${i}"><i class="bi bi-eye"></i> Details</button>`
+          : "";
         const payBtn = hasBalance(c)
           ? `<a href="./payments.html?${payParams.toString()}" class="btn btn-danger btn-sm" data-action="pay-customer" title="Record payment">Pay</a>`
           : "";
+        const actions = `${detailsBtn}${payBtn}`;
         return `<tr data-customer-row data-index="${i}" class="${rowClass}">
           <td>${escapeHtml(c.name || "—")}</td>
           <td>${escapeHtml(c.contact || "—")}</td>
           <td>${escapeHtml(c.address || "—")}</td>
-          <td class="small">${escapeHtml(summary)}${btn}</td>
+          <td class="small">${escapeHtml(summary)}</td>
           <td>₱${balanceRounded(c).toFixed(2)}</td>
           <td><span class="${statusClass(c)}">${escapeHtml(statusText(c))}</span></td>
-          <td>${payBtn}</td>
-        </tr>
-        <tr data-detail-row data-for-index="${i}" class="d-none"><td colspan="7" class="bg-light pt-2 pb-3 px-3"></td></tr>`;
+          <td class="text-end">${actions}</td>
+        </tr>`;
       }
     )
     .join("");
@@ -217,27 +501,62 @@ document.addEventListener("click", (e) => {
     loadCustomers({ ...getCustomersParams() });
     return;
   }
-  const toggleBtn = e.target.closest("[data-action='toggle-details']");
-  if (toggleBtn) {
+  const detailsBtn = e.target.closest("[data-action='view-customer-details']");
+  if (detailsBtn) {
     e.preventDefault();
-    const index = toggleBtn.getAttribute("data-index");
+    const index = detailsBtn.getAttribute("data-index");
     if (index == null) return;
     const idx = parseInt(index, 10);
-    const detailRow = document.querySelector(`tr[data-detail-row][data-for-index="${index}"]`);
     const customer = lastRenderedCustomers[idx];
-    if (!detailRow || !customer) return;
-    const td = detailRow.querySelector("td");
-    const isExpanded = !detailRow.classList.contains("d-none");
-    if (isExpanded) {
-      detailRow.classList.add("d-none");
-      if (td) td.innerHTML = "";
-      toggleBtn.innerHTML = '<i class="bi bi-chevron-down" aria-hidden="true"></i> View details';
-      toggleBtn.setAttribute("aria-expanded", "false");
-    } else {
-      if (td) td.innerHTML = buildDetailsHtml(customer);
-      detailRow.classList.remove("d-none");
-      toggleBtn.innerHTML = '<i class="bi bi-chevron-up" aria-hidden="true"></i> Hide details';
-      toggleBtn.setAttribute("aria-expanded", "true");
+    if (!customer) return;
+    currentCustomerDetails = customer;
+    const modalEl = document.getElementById("customerDetailsModal");
+    const bodyEl = document.getElementById("customer-details-body");
+    const titleEl = document.getElementById("customerDetailsModalLabel");
+    if (!modalEl || !bodyEl || !titleEl) return;
+    titleEl.textContent = customer.name || "Customer details";
+    bodyEl.innerHTML = buildDetailsHtml(customer);
+    updateCustomerSaleIssueButtons(bodyEl);
+    const m = new bootstrap.Modal(modalEl);
+    m.show();
+    return;
+  }
+  const saveBtn = e.target.closest("#btn-customer-detail-save");
+  if (saveBtn) {
+    e.preventDefault();
+    updateCustomerBasicInfo();
+    return;
+  }
+  const saleActionBtn = e.target.closest("[data-action='customer-sale-mark']");
+  if (saleActionBtn) {
+    e.preventDefault();
+    const saleId = saleActionBtn.getAttribute("data-sale-id");
+    const kind = saleActionBtn.getAttribute("data-kind") || "resolved";
+    if (saleId) openCustomerSaleConfirmModal(saleId, kind);
+    return;
+  }
+  const confirmBtn = e.target.closest("#btn-customer-sale-confirm");
+  if (confirmBtn) {
+    e.preventDefault();
+    if (pendingCustomerSaleConfirm && pendingCustomerSaleConfirm.saleId) {
+      const { saleId, kind } = pendingCustomerSaleConfirm;
+      pendingCustomerSaleConfirm = null;
+      ensureAndResolveIssueForSale(saleId, kind);
+      const modalEl = document.getElementById("customerSaleConfirmModal");
+      if (modalEl) {
+        const m = bootstrap.Modal.getInstance(modalEl);
+        if (m) m.hide();
+      }
+    }
+    return;
+  }
+  const openSaleBtn = e.target.closest("[data-action='customer-sale-open']");
+  if (openSaleBtn) {
+    e.preventDefault();
+    const saleId = openSaleBtn.getAttribute("data-sale-id");
+    if (saleId) {
+      const params = new URLSearchParams({ saleId: String(saleId), focusIssue: "1" });
+      window.location.href = `./sales.html?${params.toString()}`;
     }
     return;
   }

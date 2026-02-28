@@ -1,6 +1,7 @@
 import express from "express";
 import pool, { tableHasColumn } from "../db.js";
 import { authenticateToken } from "../middleware/authMiddleware.js";
+import { logChange } from "../changeLog.js";
 
 const router = express.Router();
 router.use(authenticateToken);
@@ -212,7 +213,15 @@ router.put("/:id", async (req, res) => {
     if (result.affectedRows === 0) {
       return res.status(404).json({ message: "Customer not found." });
     }
-    return res.json({ message: "Customer updated.", customer_id: id });
+    const [rows] = await pool.query(
+      "SELECT customer_id AS id, name, contact, address, total_balance FROM customers WHERE customer_id = ?",
+      [id]
+    );
+    const customer = rows[0] || { id };
+
+    await logChange("customer", customer.id, "update", customer);
+
+    return res.json({ message: "Customer updated.", customer });
   } catch (err) {
     console.error("PUT /api/customers/:id:", err);
     return res.status(500).json({ message: "Failed to update customer." });

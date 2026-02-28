@@ -1,7 +1,4 @@
-const API_ORIGIN =
-  window.location.port === "5500"
-    ? "http://localhost:5000"
-    : window.location.origin;
+import { API_ORIGIN } from "./config.js";
 
 const BASE = `${API_ORIGIN}/api/password-resets`;
 

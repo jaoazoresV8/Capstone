@@ -1,13 +1,12 @@
 import { initPasswordResetAdmin } from "./password-resets.js";
-
-const API_ORIGIN =
-  window.location.port === "5500"
-    ? "http://localhost:5000"
-    : window.location.origin;
+import { initSalesIssuesIndicator } from "./sales-issues-indicator.js";
+import { initSaleIssuesAdmin } from "./sales-issues.js";
+import { API_ORIGIN } from "./config.js";
 
 const API_BASE = `${API_ORIGIN}/api/auth`;
 const SETTINGS_API = `${API_ORIGIN}/api/settings`;
 const DASHBOARD_API = `${API_ORIGIN}/api/dashboard/overview`;
+const SYNC_STATUS_API = `${API_ORIGIN}/api/client-sync-status`;
 
 const logoutBtn = document.getElementById("logout-btn");
 
@@ -73,6 +72,54 @@ function initMarkupSetting() {
   });
 }
 const navUserName = document.getElementById("nav-user-name");
+
+let syncStatusTimer = null;
+
+async function fetchAndRenderSyncStatus() {
+  const wrap = document.getElementById("nav-sync-indicator");
+  const icon = document.getElementById("nav-sync-icon");
+  const text = document.getElementById("nav-sync-text");
+  const spinner = document.getElementById("nav-sync-spinner");
+  if (!wrap || !icon || !text || !spinner) return;
+
+  wrap.classList.remove("sync-online", "sync-offline", "sync-local-only");
+  spinner.classList.remove("d-none");
+
+  try {
+    const res = await fetch(SYNC_STATUS_API, { headers: getAuthHeaders() });
+    const data = await res.json().catch(() => ({}));
+
+    spinner.classList.add("d-none");
+
+    if (!data.centralConfigured || data.mode === "local") {
+      wrap.classList.add("sync-local-only");
+      icon.className = "bi bi-hdd-network me-1";
+      text.textContent = "Local database only";
+      return;
+    }
+
+    if (data.centralReachable) {
+      wrap.classList.add("sync-online");
+      icon.className = "bi bi-cloud-check me-1";
+      text.textContent = "Synced with central";
+    } else {
+      wrap.classList.add("sync-offline");
+      icon.className = "bi bi-shield-check me-1";
+      text.textContent = "Central offline – storing locally";
+    }
+  } catch {
+    spinner.classList.add("d-none");
+    wrap.classList.add("sync-offline");
+    icon.className = "bi bi-shield-check me-1";
+    text.textContent = "Central offline – storing locally";
+  }
+}
+
+function initSyncStatusPolling() {
+  fetchAndRenderSyncStatus();
+  if (syncStatusTimer) clearInterval(syncStatusTimer);
+  syncStatusTimer = setInterval(fetchAndRenderSyncStatus, 15000);
+}
 
 async function loadDashboardOverview() {
   try {
@@ -262,6 +309,8 @@ const ensureAuthenticated = async () => {
     if (user.role === "admin") {
       document.body.classList.add("admin-visible");
       initPasswordResetAdmin();
+      initSalesIssuesIndicator();
+      initSaleIssuesAdmin();
       initMarkupSetting();
     }
   } catch {
@@ -283,6 +332,7 @@ if (logoutBtn) {
 
 window.addEventListener("DOMContentLoaded", () => {
   highlightActiveNav();
+  initSyncStatusPolling();
   
   ensureAuthenticated().catch(() => {
     document.body.classList.remove("page-loading");

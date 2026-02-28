@@ -1,7 +1,4 @@
-/**
- * Electron main process.
- * Sets SQLite DB path to userData, starts the Express backend, then opens the app window.
- */
+
 import { app as electronApp, BrowserWindow, dialog } from "electron";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -9,8 +6,7 @@ import fs from "fs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Use Chromium's print preview on Windows instead of "This app doesn't support print preview".
-// Must be set before app is ready.
+
 electronApp.commandLine.appendSwitch("enable-print-preview");
 
 const PORT = process.env.PORT || 5000;
@@ -34,7 +30,7 @@ function showError(title, message) {
   dialog.showErrorBox(title, message);
 }
 
-// SQLite database path: store in Electron userData so data persists per user
+
 function setElectronEnv() {
   try {
     const userData = electronApp.getPath("userData");
@@ -70,20 +66,20 @@ function createWindow() {
         nodeIntegration: false,
         contextIsolation: true,
       },
-      show: false, // Don't show until ready
+      show: false, 
     });
 
-    // Show window when ready
+    
     mainWindow.once("ready-to-show", () => {
       log("Window ready to show");
       mainWindow.show();
     });
 
-    // Handle navigation errors
+    
     mainWindow.webContents.on("did-fail-load", (event, errorCode, errorDescription, validatedURL) => {
       log(`Failed to load: ${validatedURL} - ${errorCode}: ${errorDescription}`);
       if (errorCode === -105 || errorCode === -106) {
-        // ERR_NAME_NOT_RESOLVED or ERR_INTERNET_DISCONNECTED
+        
         showError(
           "Connection Error",
           `Cannot connect to server at http://localhost:${PORT}.\n\n` +
@@ -100,7 +96,7 @@ function createWindow() {
       mainWindow = null;
     });
 
-    // Optional: open DevTools in development
+    // open DevTools in development
     if (process.env.NODE_ENV === "development") {
       mainWindow.webContents.openDevTools();
     }
@@ -123,7 +119,7 @@ electronApp.whenReady().then(async () => {
     await startServer(PORT);
     log("Server started successfully");
 
-    // Wait a moment for server to be fully ready
+  
     await new Promise(resolve => setTimeout(resolve, 500));
     
     createWindow();
