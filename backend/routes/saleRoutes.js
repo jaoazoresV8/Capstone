@@ -125,12 +125,29 @@ router.get("/", async (req, res) => {
     if (rows.length === 0) return res.json({ sales: [] });
 
     const [payments] = await pool.query(
-      "SELECT sale_id, reference_number FROM payments WHERE sale_id IN (?)",
+      "SELECT sale_id, reference_number, payment_method FROM payments WHERE sale_id IN (?)",
       [rows.map((r) => r.id)]
     );
-    const payBySale = Object.fromEntries(
-      (payments || []).map((p) => [p.sale_id, p.reference_number || "cash"])
-    );
+    const payBySale = {};
+    const refBySale = {};
+    for (const p of payments || []) {
+      const methodRaw =
+        p.payment_method != null && String(p.payment_method).trim()
+          ? String(p.payment_method).trim().toLowerCase()
+          : "";
+      const refRaw =
+        p.reference_number != null && String(p.reference_number).trim()
+          ? String(p.reference_number).trim().toLowerCase()
+          : "";
+      let method = "cash";
+      if (methodRaw) {
+        method = methodRaw;
+      } else if (refRaw === "gcash" || refRaw === "paymaya" || refRaw === "cash") {
+        method = refRaw;
+      }
+      payBySale[p.sale_id] = method;
+      refBySale[p.sale_id] = p.reference_number != null && String(p.reference_number).trim() ? String(p.reference_number).trim() : null;
+    }
 
     // Open issue indicator per sale (if table exists)
     let openIssuesBySale = {};
@@ -151,6 +168,7 @@ router.get("/", async (req, res) => {
       ...r,
       customer_name: r.customer_name || r.walk_in_customer_name || "—",
       payment_method: payBySale[r.id] || "cash",
+      reference_number: refBySale[r.id] ?? null,
       has_open_issue: hasIssues ? Boolean(openIssuesBySale[r.id]) : false,
     }));
     return res.json({ sales: salesWithMethod });
@@ -208,10 +226,25 @@ router.get("/:id", async (req, res) => {
     const [sales] = await pool.query(query, [req.params.id]);
     if (sales.length === 0) return res.status(404).json({ message: "Sale not found." });
     const [payRows] = await pool.query(
-      "SELECT reference_number FROM payments WHERE sale_id = ? LIMIT 1",
+      "SELECT reference_number, payment_method FROM payments WHERE sale_id = ? ORDER BY payment_date DESC, payment_id DESC LIMIT 1",
       [req.params.id]
     );
-    const payment_method = payRows[0]?.reference_number || "cash";
+    let payment_method = "cash";
+    if (payRows && payRows.length > 0) {
+      const methodRaw =
+        payRows[0].payment_method != null && String(payRows[0].payment_method).trim()
+          ? String(payRows[0].payment_method).trim().toLowerCase()
+          : "";
+      const refRaw =
+        payRows[0].reference_number != null && String(payRows[0].reference_number).trim()
+          ? String(payRows[0].reference_number).trim().toLowerCase()
+          : "";
+      if (methodRaw) {
+        payment_method = methodRaw;
+      } else if (refRaw === "gcash" || refRaw === "paymaya" || refRaw === "cash") {
+        payment_method = refRaw;
+      }
+    }
     const [items] = await pool.query(
       `SELECT si.sale_item_id, si.product_id, p.name AS product_name,
               si.quantity, si.price, si.subtotal
@@ -230,10 +263,12 @@ router.get("/:id", async (req, res) => {
       has_open_issue = openIssues.length > 0;
     }
 
+    const paymentRefDisplay = payRows && payRows.length > 0 ? (payRows[0].reference_number || null) : null;
     const sale = {
       ...sales[0],
       customer_name: sales[0].customer_name || sales[0].walk_in_customer_name || "—",
       payment_method,
+      reference_number: paymentRefDisplay,
       items,
       has_open_issue,
     };
@@ -248,7 +283,18 @@ router.get("/:id", async (req, res) => {
 router.post("/", async (req, res) => {
   const conn = await pool.getConnection();
   try {
-    const { customer_id, customer_name, transaction_type, items, payment_method, amount_paid, reference_number: bodyRef, customer_contact, customer_address } = req.body;
+    const {
+      customer_id,
+      customer_name,
+      transaction_type,
+      items,
+      payment_method,
+      amount_paid,
+      reference_number: bodyRef,
+      customer_contact,
+      customer_address,
+      receipt_number,
+    } = req.body;
     const referenceNumber = (bodyRef != null && String(bodyRef).trim()) ? String(bodyRef).trim() : null;
     const contact = customer_contact != null
       ? (typeof customer_contact === "number" ? String(customer_contact) : (typeof customer_contact === "string" ? customer_contact.trim() : null))
@@ -348,14 +394,20 @@ router.post("/", async (req, res) => {
     const status = remaining <= 0 ? "paid" : paid > 0 ? "partial" : "unpaid";
     const payMethod = payment_method && ["cash", "gcash", "paymaya", "credit"].includes(payment_method) ? payment_method : "cash";
 
-    // Generate O.R. number if column exists (SQLite: no REGEXP by default; use LIKE)
+    // Generate O.R. / receipt number if column exists.
+    // If the client provides a receipt_number (e.g. C01-20260305-000123), use it as-is
+    // so that the customer-facing receipt is never replaced.
     let orNumber = null;
     if (hasOrNumber) {
-      const [maxOr] = await conn.query(
-        "SELECT MAX(CAST(REPLACE(or_number, 'OR-', '') AS INTEGER)) AS max_num FROM sales WHERE or_number IS NOT NULL AND or_number LIKE 'OR-%'"
-      );
-      const nextNum = (maxOr[0]?.max_num || 0) + 1;
-      orNumber = `OR-${String(nextNum).padStart(3, "0")}`;
+      if (typeof receipt_number === "string" && receipt_number.trim()) {
+        orNumber = receipt_number.trim();
+      } else {
+        const [maxOr] = await conn.query(
+          "SELECT MAX(CAST(REPLACE(or_number, 'OR-', '') AS INTEGER)) AS max_num FROM sales WHERE or_number IS NOT NULL AND or_number LIKE 'OR-%'"
+        );
+        const nextNum = (maxOr[0]?.max_num || 0) + 1;
+        orNumber = `OR-${String(nextNum).padStart(3, "0")}`;
+      }
     }
 
     // Build INSERT query based on whether new columns exist
@@ -414,6 +466,16 @@ router.post("/", async (req, res) => {
           totalAmount,
         ]
       );
+      // Keep only the latest 10 activity entries (local-only, not synced to central)
+      await conn.query(
+        `DELETE FROM activity_log
+         WHERE activity_id NOT IN (
+           SELECT activity_id
+           FROM activity_log
+           ORDER BY datetime(created_at) DESC, activity_id DESC
+           LIMIT 10
+         )`
+      );
     } catch (_) {
       // Activity log failure should not break main transaction
     }
@@ -427,7 +489,9 @@ router.post("/", async (req, res) => {
                             s.customer_name AS walk_in_customer_name, ${hasTransactionType ? 's.transaction_type' : 'NULL AS transaction_type'},
                             ${hasOrNumber ? 's.or_number' : 'NULL AS or_number'},
                             s.total_amount, s.amount_paid, s.remaining_balance, s.status,
-                            s.sale_date
+                            s.sale_date,
+                            c.contact AS customer_contact,
+                            c.address AS customer_address
                      FROM sales s LEFT JOIN customers c ON c.customer_id = s.customer_id
                      WHERE s.sale_id = ?`;
     } else {
@@ -435,7 +499,9 @@ router.post("/", async (req, res) => {
                             NULL AS walk_in_customer_name, NULL AS transaction_type,
                             ${hasOrNumber ? 's.or_number' : 'NULL AS or_number'},
                             s.total_amount, s.amount_paid, s.remaining_balance, s.status,
-                            s.sale_date
+                            s.sale_date,
+                            c.contact AS customer_contact,
+                            c.address AS customer_address
                      FROM sales s LEFT JOIN customers c ON c.customer_id = s.customer_id
                      WHERE s.sale_id = ?`;
     }
@@ -449,11 +515,14 @@ router.post("/", async (req, res) => {
       ...newSale[0],
       customer_name: newSale[0].customer_name || newSale[0].walk_in_customer_name || "—",
       payment_method: payMethod,
+      reference_number: referenceNumber || null,
       or_number: newSale[0].or_number || orNumber || null,
+      customer_contact: newSale[0].customer_contact ?? contact ?? null,
+      customer_address: newSale[0].customer_address ?? address ?? null,
       items: newItems.map((i) => ({ ...i, product_name: productMap[i.product_id]?.name || "" })),
     };
 
-    // Log sale + items for later central sync
+    // Log sale + items for later central sync (includes actual ref no. for GCash/PayMaya)
     await logChange("sale", saleWithItems.id, "create", saleWithItems);
 
     return res.status(201).json({ sale: saleWithItems });
@@ -724,6 +793,16 @@ router.post("/:id/payments", async (req, res) => {
           `Method: ${payMethod}`,
           amountRounded,
         ]
+      );
+      // Keep only the latest 10 activity entries (local-only, not synced to central)
+      await conn.query(
+        `DELETE FROM activity_log
+         WHERE activity_id NOT IN (
+           SELECT activity_id
+           FROM activity_log
+           ORDER BY datetime(created_at) DESC, activity_id DESC
+           LIMIT 10
+         )`
       );
     } catch (_) {}
 

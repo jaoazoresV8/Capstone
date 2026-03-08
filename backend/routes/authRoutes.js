@@ -5,6 +5,7 @@ import jwt from "jsonwebtoken";
 import pool from "../db.js";
 import { authenticateToken } from "../middleware/authMiddleware.js";
 import { createRateLimit } from "../middleware/rateLimit.js";
+import { logChange } from "../changeLog.js";
 
 const router = express.Router();
 
@@ -274,12 +275,27 @@ router.post("/forgot-password", forgotLimiter, async (req, res) => {
       [userId],
     );
     const existing = Array.isArray(existingResult?.[0]) ? existingResult[0] : existingResult;
+    let requestId = null;
+
     if (!Array.isArray(existing) || existing.length === 0) {
-      await pool.query(
+      const [insertResult] = await pool.query(
         `INSERT INTO password_reset_requests (user_id, username, requested_at, status)
          VALUES (?, ?, datetime('now','localtime'), 'pending')`,
         [userId, uname],
       );
+      requestId = insertResult.insertId;
+    } else {
+      requestId = existing[0].request_id ?? existing[0].REQUEST_ID ?? null;
+    }
+
+    // Log for central sync so admins in central see the request.
+    if (requestId != null) {
+      await logChange("password_reset", requestId, "create", {
+        id: requestId,
+        user_id: userId,
+        username: uname,
+        status: "pending",
+      });
     }
 
     return res.json({

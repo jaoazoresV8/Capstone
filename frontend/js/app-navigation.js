@@ -133,6 +133,20 @@
     }
   });
 
+  window.addEventListener("app:refresh", function () {
+    try {
+      var url = window.location.href;
+      var pageFile = getPageFromHref(url);
+      if (!pageFile) {
+        window.location.reload();
+        return;
+      }
+      loadPage(url, false);
+    } catch {
+      window.location.reload();
+    }
+  });
+
   function ensureGlobalScripts() {
     ensureModalDraggable();
     ensureViewToggle();

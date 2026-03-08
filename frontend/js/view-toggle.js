@@ -301,6 +301,16 @@
       showView(view);
     });
 
+    // Allow pages to request a rebuild of the current view
+    // after table rows change (e.g., search/filter or reload).
+    section.addEventListener("data-view:refresh", function () {
+      const activeBtn =
+        toggleGroup.querySelector(".view-toggle-btn.active") ||
+        toggleGroup.querySelector('.view-toggle-btn[data-view="table"]');
+      const currentView = activeBtn && activeBtn.dataset.view ? activeBtn.dataset.view : "table";
+      showView(currentView);
+    });
+
     // Start in table view
     showView("table");
   }

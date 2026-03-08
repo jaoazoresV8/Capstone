@@ -27,7 +27,7 @@ router.get("/", async (req, res) => {
     const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
 
     let sql = `SELECT p.product_id AS id, p.name, p.category, p.supplier_id, p.supplier_price, p.selling_price, p.stock_quantity,
-               p.recorded_at, p.recorded_by, s.name AS supplier_name, u.name AS recorded_by_name
+               p.recorded_at, p.recorded_by, s.name AS supplier_name, COALESCE(p.recorded_by_name, u.name) AS recorded_by_name
                FROM products p
                LEFT JOIN suppliers s ON s.supplier_id = p.supplier_id
                LEFT JOIN users u ON u.user_id = p.recorded_by WHERE 1=1`;
@@ -104,14 +104,15 @@ router.post("/", async (req, res) => {
     }
 
     const recordedBy = req.user?.userId ?? null;
+    const recordedByName = req.user?.name ?? req.user?.username ?? null;
     const [insertResult] = await pool.query(
-      "INSERT INTO products (name, category, supplier_id, supplier_price, selling_price, stock_quantity, recorded_by) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      [name.trim(), categoryStr || null, finalSupId, supPrice, price, stock, recordedBy]
+      "INSERT INTO products (name, category, supplier_id, supplier_price, selling_price, stock_quantity, recorded_by, recorded_by_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      [name.trim(), categoryStr || null, finalSupId, supPrice, price, stock, recordedBy, recordedByName]
     );
     const newId = insertResult?.insertId;
     const [rows] = await pool.query(
        `SELECT p.product_id AS id, p.name, p.category, p.supplier_id, p.supplier_price, p.selling_price, p.stock_quantity,
-       p.recorded_at, p.recorded_by, s.name AS supplier_name, u.name AS recorded_by_name
+       p.recorded_at, p.recorded_by, s.name AS supplier_name, COALESCE(p.recorded_by_name, u.name) AS recorded_by_name
        FROM products p LEFT JOIN suppliers s ON s.supplier_id = p.supplier_id LEFT JOIN users u ON u.user_id = p.recorded_by WHERE p.product_id = ?`,
       [newId]
     );
@@ -127,6 +128,16 @@ router.post("/", async (req, res) => {
           product.category ? `Category: ${product.category}` : null,
           product.selling_price ?? null,
         ]
+      );
+      // Keep only the latest 10 activity entries (local-only, not synced to central)
+      await pool.query(
+        `DELETE FROM activity_log
+         WHERE activity_id NOT IN (
+           SELECT activity_id
+           FROM activity_log
+           ORDER BY datetime(created_at) DESC, activity_id DESC
+           LIMIT 10
+         )`
       );
     } catch (_) {}
 
@@ -145,7 +156,7 @@ router.get("/:id", async (req, res) => {
     if (isNaN(id)) return res.status(400).json({ message: "Invalid product ID." });
     const [rows] = await pool.query(
       `SELECT p.product_id AS id, p.name, p.category, p.supplier_id, p.supplier_price, p.selling_price, p.stock_quantity,
-       p.recorded_at, p.recorded_by, s.name AS supplier_name, u.name AS recorded_by_name
+       p.recorded_at, p.recorded_by, s.name AS supplier_name, COALESCE(p.recorded_by_name, u.name) AS recorded_by_name
        FROM products p LEFT JOIN suppliers s ON s.supplier_id = p.supplier_id LEFT JOIN users u ON u.user_id = p.recorded_by WHERE p.product_id = ?`,
       [id]
     );
@@ -192,7 +203,7 @@ router.put("/:id", async (req, res) => {
     );
     const [rows] = await pool.query(
       `SELECT p.product_id AS id, p.name, p.category, p.supplier_id, p.supplier_price, p.selling_price, p.stock_quantity,
-       p.recorded_at, p.recorded_by, s.name AS supplier_name, u.name AS recorded_by_name
+       p.recorded_at, p.recorded_by, s.name AS supplier_name, COALESCE(p.recorded_by_name, u.name) AS recorded_by_name
        FROM products p LEFT JOIN suppliers s ON s.supplier_id = p.supplier_id LEFT JOIN users u ON u.user_id = p.recorded_by WHERE p.product_id = ?`,
       [id]
     );

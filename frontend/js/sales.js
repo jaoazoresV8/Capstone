@@ -3,6 +3,11 @@
  * Uses event delegation so "New Sale" works after pjax load.
  */
 import { API_ORIGIN } from "./config.js";
+import {
+  enqueueSyncOperation,
+  generateUuidV4,
+  rememberSaleUuidMapping,
+} from "./sync-queue.js";
 const SALES_API = `${API_ORIGIN}/api/sales`;
 const CUSTOMERS_API = `${API_ORIGIN}/api/customers`;
 const PRODUCTS_API = `${API_ORIGIN}/api/products`;
@@ -37,6 +42,51 @@ function getCurrentUser() {
 function isAdmin() {
   const user = getCurrentUser();
   return !!user && user.role === "admin";
+}
+
+function getTerminalPrefix() {
+  try {
+    const stored = localStorage.getItem("dm_terminal_prefix");
+    if (stored && typeof stored === "string" && stored.trim()) {
+      return stored.trim();
+    }
+  } catch (_) {}
+  return "C01";
+}
+
+function nextReceiptSequence(todayKey) {
+  try {
+    const raw = localStorage.getItem("dm_receipt_seq");
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.date === todayKey && typeof parsed.seq === "number") {
+        const next = parsed.seq + 1;
+        localStorage.setItem("dm_receipt_seq", JSON.stringify({ date: todayKey, seq: next }));
+        return next;
+      }
+    }
+  } catch (_) {}
+  const first = 1;
+  try {
+    localStorage.setItem("dm_receipt_seq", JSON.stringify({ date: todayKey, seq: first }));
+  } catch (_) {}
+  return first;
+}
+
+function generateLocalReceiptNumber() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  const hours = String(now.getHours()).padStart(2, "0");
+  const minutes = String(now.getMinutes()).padStart(2, "0");
+  const seconds = String(now.getSeconds()).padStart(2, "0");
+  const datePart = `${year}${month}${day}`;
+  const timePart = `${hours}${minutes}${seconds}`;
+  const seq = nextReceiptSequence(datePart);
+  const seqPart = String(seq).padStart(6, "0");
+  const prefix = getTerminalPrefix();
+  return `${prefix}-${datePart}-${timePart}-${seqPart}`;
 }
 
 /**
@@ -1189,6 +1239,16 @@ function submitSale() {
     return;
   }
   const customerContactValue = contactResultForPayload.value;
+  const receiptNumber = generateLocalReceiptNumber();
+  const saleUuid = generateUuidV4();
+
+  // Round total amount to whole pesos for sync payload as well.
+  const totalRaw = getSaleTotalRaw();
+  const totalRounded = roundToWholePeso(totalRaw);
+  const remainingBalance = Math.max(0, totalRounded - amountPaidRounded);
+  let status = "unpaid";
+  if (remainingBalance <= 0) status = "paid";
+  else if (amountPaidRounded > 0 && remainingBalance > 0) status = "partial";
 
   fetch(SALES_API, {
     method: "POST",
@@ -1206,6 +1266,15 @@ function submitSale() {
       payment_method: paymentMethod,
       amount_paid: amountPaidRounded,
       reference_number: referenceNumber || undefined,
+      // New sync-related identifiers (backend can store or ignore extras)
+      sale_uuid: saleUuid,
+      receipt_no: receiptNumber,
+      receipt_number: receiptNumber,
+      terminal_id: getTerminalPrefix(),
+      total_amount: totalRounded,
+      remaining_balance: remainingBalance,
+      status,
+      sale_date: new Date().toISOString(),
     }),
   })
     .then((r) => {
@@ -1228,7 +1297,67 @@ function submitSale() {
       const amountReceivedInput = document.getElementById("sale-amount-received");
       const amountReceived = amountReceivedInput ? parseFloat(amountReceivedInput.value) || 0 : 0;
       const change = amountReceived > amountPaidRounded ? Math.round((amountReceived - amountPaidRounded) * 100) / 100 : null;
-      showReceipt(saleData, customerName, { amountReceived: amountReceived || undefined, change: change != null ? change : undefined });
+
+      // Ensure saleData carries identifiers used for sync/receipts.
+      if (!saleData.sale_uuid) saleData.sale_uuid = saleUuid;
+      if (!saleData.receipt_no && saleData.receipt_number == null) {
+        saleData.receipt_no = receiptNumber;
+        saleData.receipt_number = receiptNumber;
+      }
+      if (!saleData.terminal_id) saleData.terminal_id = getTerminalPrefix();
+
+      showReceipt(saleData, customerName, {
+        amountReceived: amountReceived || undefined,
+        change: change != null ? change : undefined,
+      });
+
+      // Remember mapping for future payment syncs.
+      if (saleData.id) {
+        rememberSaleUuidMapping(saleData.id, saleData.sale_uuid, saleData.receipt_no || saleData.receipt_number || receiptNumber);
+      }
+
+      // Queue sync operation to central (offline‑friendly).
+      try {
+        const itemsForSync = items.map((item) => {
+          const match = saleLineItems.find((i) => i.product_id === item.product_id) || {};
+          const price = match.price != null ? match.price : 0;
+          const subtotal = price * item.quantity;
+          return {
+            product_id: item.product_id,
+            quantity: item.quantity,
+            price,
+            subtotal,
+          };
+        });
+
+        enqueueSyncOperation({
+          entityType: "sale",
+          operation: "create",
+          entityId: saleData.id || null,
+          localId: null,
+          data: {
+            sale_uuid: saleData.sale_uuid,
+            receipt_no: saleData.receipt_no || saleData.receipt_number || receiptNumber,
+            terminal_id: saleData.terminal_id || getTerminalPrefix(),
+            customer_id: customerId || null,
+            customer_name: saleData.customer_name || customerName,
+            customer_contact: customerContactValue,
+            customer_address: addressTrimmedForPayload || undefined,
+            transaction_type: "walk-in",
+            total_amount: totalRounded,
+            amount_paid: amountPaidRounded,
+            remaining_balance: remainingBalance,
+            status,
+            sale_date: saleData.sale_date || new Date().toISOString(),
+            items: itemsForSync,
+            payment_method: paymentMethod,
+            reference_number: referenceNumber || undefined,
+          },
+        });
+      } catch (_) {
+        // If queuing fails, we still keep the local sale; sync can be retried later.
+      }
+
       loadSales("");
       const alertEl = document.getElementById("sales-alert");
       if (alertEl) {
@@ -1259,11 +1388,14 @@ const RECEIPT_COMPANY = {
 function showReceipt(sale, displayCustomerName, options = {}) {
   const content = document.getElementById("receipt-content");
   const saleIdEl = document.getElementById("receipt-sale-id");
-  if (saleIdEl) saleIdEl.textContent = sale.id;
   const customerName = sale.customer_name || displayCustomerName || "—";
   const paymentMethod = sale.payment_method || "cash";
   const paymentLabel = paymentMethod === "gcash" ? "GCash" : paymentMethod === "paymaya" ? "PayMaya" : paymentMethod === "credit" ? "Credit" : "Cash";
-  const orNumber = sale.or_number || "";
+  const referenceNumber = sale.reference_number && String(sale.reference_number).trim() && (paymentMethod === "gcash" || paymentMethod === "paymaya")
+    ? String(sale.reference_number).trim()
+    : "";
+  const orNumber = sale.or_number || sale.receipt_number || "";
+  if (saleIdEl) saleIdEl.textContent = orNumber || sale.id;
   const totalAmount = Number(sale.total_amount || 0);
   const amountPaid = Number(sale.amount_paid || 0);
   const balance = Number(sale.remaining_balance || 0);
@@ -1305,7 +1437,7 @@ function showReceipt(sale, displayCustomerName, options = {}) {
         <div class="receipt-meta">
           <p><strong>Sale #</strong> ${sale.id} &nbsp;&nbsp; <strong>Date:</strong> ${sale.sale_date ? new Date(sale.sale_date).toLocaleString() : ""}</p>
           <p><strong>Customer:</strong> ${escapeHtml(customerName)}</p>
-          <p><strong>Payment:</strong> ${escapeHtml(paymentLabel)}</p>
+          <p><strong>Payment:</strong> ${escapeHtml(paymentLabel)}${referenceNumber ? ` &nbsp;&nbsp; <strong>Ref:</strong> ${escapeHtml(referenceNumber)}` : ""}</p>
         </div>
 
         <table class="receipt-table">
@@ -1575,6 +1707,17 @@ function renderSales(sales) {
         </tr>`;
     })
     .join("");
+
+  // Ask the generic view-toggle helper to rebuild the currently active view
+  // (table/card/kanban) so filters/search also affect non-table layouts.
+  try {
+    const section = document.querySelector('.data-view-section[data-view-id="sales"]');
+    if (section && typeof CustomEvent === "function") {
+      section.dispatchEvent(new CustomEvent("data-view:refresh"));
+    }
+  } catch (_) {
+    // Ignore; table view still renders correctly.
+  }
 }
 
 function filterSales(query, statusFilter) {

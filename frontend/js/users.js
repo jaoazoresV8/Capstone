@@ -2,26 +2,7 @@ import { API_ORIGIN } from "./config.js";
 
 const USERS_BASE = `${API_ORIGIN}/api/users`;
 
-const tableBody = document.getElementById("users-table-body");
 const alertBox = document.getElementById("users-alert");
-const modalEl = document.getElementById("userModal");
-const userForm = document.getElementById("user-form");
-const idInput = document.getElementById("user-id");
-const nameInput = document.getElementById("user-name");
-const usernameInput = document.getElementById("user-username");
-const emailInput = document.getElementById("user-email");
-const roleInput = document.getElementById("user-role");
-const passwordInput = document.getElementById("user-password");
-const modalTitle = document.getElementById("userModalLabel");
-const pageAccessWrap = document.getElementById("user-page-access-wrap");
-const pageAccessAll = document.getElementById("user-page-access-all");
-const pageAccessSelected = document.getElementById("user-page-access-selected");
-const pageCheckboxesWrap = document.getElementById("user-page-checkboxes");
-
-const deleteUserModalEl = document.getElementById("deleteUserModal");
-const deleteUserMessageEl = document.getElementById("delete-user-message");
-const deleteUserTypingEl = document.getElementById("delete-user-typing");
-const deleteUserConfirmBtn = document.getElementById("delete-user-confirm-btn");
 
 let deleteUserModalInstance = null;
 let pendingDeleteUserId = null;
@@ -49,35 +30,48 @@ function escapeAttr(s) {
 }
 
 function syncPageAccessVisibility() {
-  const isStaff = roleInput && roleInput.value === "staff";
-  if (pageAccessWrap) pageAccessWrap.classList.toggle("d-none", !isStaff);
-  if (!isStaff && pageCheckboxesWrap) pageCheckboxesWrap.classList.add("d-none");
+  const roleInputEl = document.getElementById("user-role");
+  const pageAccessWrapEl = document.getElementById("user-page-access-wrap");
+  const pageCheckboxesWrapEl = document.getElementById("user-page-checkboxes");
+
+  const isStaff = roleInputEl && roleInputEl.value === "staff";
+  if (pageAccessWrapEl) pageAccessWrapEl.classList.toggle("d-none", !isStaff);
+  if (!isStaff && pageCheckboxesWrapEl) pageCheckboxesWrapEl.classList.add("d-none");
 }
 
 function syncPageCheckboxesVisibility() {
-  const show = pageAccessSelected && pageAccessSelected.checked;
-  if (pageCheckboxesWrap) pageCheckboxesWrap.classList.toggle("d-none", !show);
+  const pageAccessSelectedEl = document.getElementById("user-page-access-selected");
+  const pageCheckboxesWrapEl = document.getElementById("user-page-checkboxes");
+  const show = pageAccessSelectedEl && pageAccessSelectedEl.checked;
+  if (pageCheckboxesWrapEl) pageCheckboxesWrapEl.classList.toggle("d-none", !show);
 }
 
 function getSelectedPageAccess() {
-  if (pageAccessAll && pageAccessAll.checked) return null;
-  if (!pageAccessSelected || !pageAccessSelected.checked) return null;
+  const pageAccessAllEl = document.getElementById("user-page-access-all");
+  const pageAccessSelectedEl = document.getElementById("user-page-access-selected");
+
+  if (pageAccessAllEl && pageAccessAllEl.checked) return null;
+  if (!pageAccessSelectedEl || !pageAccessSelectedEl.checked) return null;
   const cbs = document.querySelectorAll(".user-page-cb:checked");
   const arr = Array.from(cbs).map((cb) => cb.value).filter((v) => PAGE_KEYS.includes(v));
   return arr.length > 0 ? arr : null;
 }
 
 function setPageAccess(allowedPages) {
+  const pageAccessAllEl = document.getElementById("user-page-access-all");
+  const pageAccessSelectedEl = document.getElementById("user-page-access-selected");
+  const pageCheckboxesWrapEl = document.getElementById("user-page-checkboxes");
+
   if (!allowedPages || allowedPages.length === 0) {
-    if (pageAccessAll) pageAccessAll.checked = true;
-    if (pageAccessSelected) pageAccessSelected.checked = false;
-    if (pageCheckboxesWrap) pageCheckboxesWrap.classList.add("d-none");
+    if (pageAccessAllEl) pageAccessAllEl.checked = true;
+    if (pageAccessSelectedEl) pageAccessSelectedEl.checked = false;
+    if (pageCheckboxesWrapEl) pageCheckboxesWrapEl.classList.add("d-none");
     document.querySelectorAll(".user-page-cb").forEach((cb) => (cb.checked = false));
     return;
   }
-  if (pageAccessSelected) pageAccessSelected.checked = true;
-  if (pageAccessAll) pageAccessAll.checked = false;
-  if (pageCheckboxesWrap) pageCheckboxesWrap.classList.remove("d-none");
+  if (pageAccessSelectedEl) pageAccessSelectedEl.checked = true;
+  if (pageAccessAllEl) pageAccessAllEl.checked = false;
+  if (pageCheckboxesWrapEl) pageCheckboxesWrapEl.classList.remove("d-none");
   document.querySelectorAll(".user-page-cb").forEach((cb) => {
     cb.checked = allowedPages.includes(cb.value);
   });
@@ -107,9 +101,13 @@ const getCurrentUserId = () => {
   }
 };
 
-let usersInitialized = false;
-
 const loadUsers = async () => {
+  const bodyEl = document.body;
+  if (!bodyEl || bodyEl.dataset.page !== "users") return;
+
+  const tableBodyEl = document.getElementById("users-table-body");
+  if (!tableBodyEl) return;
+
   const token = localStorage.getItem("sm_token");
   if (!token) {
     window.location.href = "/";
@@ -132,12 +130,12 @@ const loadUsers = async () => {
     const currentUserId = getCurrentUserId();
 
     if (users.length === 0) {
-      tableBody.innerHTML =
+      tableBodyEl.innerHTML =
         '<tr><td colspan="6" class="text-muted small">No users yet.</td></tr>';
       return;
     }
 
-    tableBody.innerHTML = users
+    tableBodyEl.innerHTML = users
       .map(
         (u) => {
           const allowed = Array.isArray(u.allowed_pages) ? u.allowed_pages.join(",") : "";
@@ -168,26 +166,50 @@ const loadUsers = async () => {
 };
 
 const openAddModal = () => {
-  modalTitle.textContent = "Add User";
-  idInput.value = "";
-  nameInput.value = "";
-  usernameInput.value = "";
-  if (emailInput) emailInput.value = "";
-  roleInput.value = "staff";
-  passwordInput.value = "";
+  const modalTitleEl = document.getElementById("userModalLabel");
+  const idInputEl = document.getElementById("user-id");
+  const nameInputEl = document.getElementById("user-name");
+  const usernameInputEl = document.getElementById("user-username");
+  const emailInputEl = document.getElementById("user-email");
+  const roleInputEl = document.getElementById("user-role");
+  const passwordInputEl = document.getElementById("user-password");
+
+  if (!modalTitleEl || !idInputEl || !nameInputEl || !usernameInputEl || !roleInputEl || !passwordInputEl) {
+    return;
+  }
+
+  modalTitleEl.textContent = "Add User";
+  idInputEl.value = "";
+  nameInputEl.value = "";
+  usernameInputEl.value = "";
+  if (emailInputEl) emailInputEl.value = "";
+  roleInputEl.value = "staff";
+  passwordInputEl.value = "";
   setPageAccess(null);
   syncPageAccessVisibility();
   clearAlert();
 };
 
 const openEditModal = (row) => {
-  modalTitle.textContent = "Edit User";
-  idInput.value = row.dataset.id;
-  nameInput.value = row.children[0].textContent;
-  usernameInput.value = row.children[1].textContent;
-  if (emailInput) emailInput.value = row.children[2].textContent;
-  roleInput.value = row.children[3].textContent.toLowerCase();
-  passwordInput.value = "";
+  const modalTitleEl = document.getElementById("userModalLabel");
+  const idInputEl = document.getElementById("user-id");
+  const nameInputEl = document.getElementById("user-name");
+  const usernameInputEl = document.getElementById("user-username");
+  const emailInputEl = document.getElementById("user-email");
+  const roleInputEl = document.getElementById("user-role");
+  const passwordInputEl = document.getElementById("user-password");
+
+  if (!modalTitleEl || !idInputEl || !nameInputEl || !usernameInputEl || !roleInputEl || !passwordInputEl) {
+    return;
+  }
+
+  modalTitleEl.textContent = "Edit User";
+  idInputEl.value = row.dataset.id;
+  nameInputEl.value = row.children[0].textContent;
+  usernameInputEl.value = row.children[1].textContent;
+  if (emailInputEl) emailInputEl.value = row.children[2].textContent;
+  roleInputEl.value = row.children[3].textContent.toLowerCase();
+  passwordInputEl.value = "";
   const allowedStr = row.dataset.allowedPages || "";
   const allowed = allowedStr ? allowedStr.split(",").filter(Boolean) : null;
   setPageAccess(allowed);
@@ -196,6 +218,13 @@ const openEditModal = (row) => {
 };
 
 function openDeleteUserModal(id, name) {
+  const deleteUserModalEl = document.getElementById("deleteUserModal");
+  const deleteUserMessageEl = document.getElementById("delete-user-message");
+  const deleteUserTypingEl = document.getElementById("delete-user-typing");
+  const deleteUserConfirmBtn = document.getElementById("delete-user-confirm-btn");
+
+  if (!deleteUserModalEl) return;
+
   pendingDeleteUserId = id;
   pendingDeleteUserName = name || "this user";
   if (deleteUserMessageEl) {
@@ -213,6 +242,9 @@ function openDeleteUserModal(id, name) {
 }
 
 function closeDeleteUserModal() {
+  const deleteUserTypingEl = document.getElementById("delete-user-typing");
+  const deleteUserConfirmBtn = document.getElementById("delete-user-confirm-btn");
+
   pendingDeleteUserId = null;
   pendingDeleteUserName = null;
   if (deleteUserTypingEl) deleteUserTypingEl.value = "";
@@ -258,137 +290,175 @@ document.addEventListener("click", (e) => {
   const editBtn = e.target.closest("button[data-action='edit'][data-id]");
   if (editBtn) {
     const id = editBtn.dataset.id;
-    if (!id || !tableBody) return;
+    if (!id) return;
+
+    const tableBodyEl = document.getElementById("users-table-body");
+    if (!tableBodyEl) return;
+
     const row =
-      tableBody.querySelector(`tr[data-id="${id}"]`) ||
-      Array.from(tableBody.querySelectorAll("tr[data-id]")).find((tr) => tr.dataset.id === id);
+      tableBodyEl.querySelector(`tr[data-id="${id}"]`) ||
+      Array.from(tableBodyEl.querySelectorAll("tr[data-id]")).find((tr) => tr.dataset.id === id);
     if (!row) return;
     openEditModal(row);
-    if (!bootstrapModal) {
-      bootstrapModal = new bootstrap.Modal(modalEl);
+    const modalEl = document.getElementById("userModal");
+    if (modalEl) {
+      // Recreate instance if modal element was replaced (e.g. after PJAX navigation)
+      const currentEl = bootstrapModal && bootstrapModal._element;
+      if (!bootstrapModal || currentEl !== modalEl) {
+        bootstrapModal = new bootstrap.Modal(modalEl);
+      }
+      bootstrapModal.show();
     }
-    bootstrapModal.show();
+  }
+
+  // Handle click on confirm button inside delete modal
+  const confirmBtn = e.target.closest("#delete-user-confirm-btn");
+  if (confirmBtn) {
+    const typingEl = document.getElementById("delete-user-typing");
+    if (!typingEl || typingEl.value.trim() !== "Delete") return;
+    performDeleteUser();
   }
 });
 
-if (deleteUserTypingEl) {
-  deleteUserTypingEl.addEventListener("input", () => {
-    if (deleteUserConfirmBtn) {
-      deleteUserConfirmBtn.disabled = deleteUserTypingEl.value.trim() !== "Delete";
-    }
-  });
-  deleteUserTypingEl.addEventListener("keydown", (ev) => {
-    if (ev.key === "Enter" && deleteUserTypingEl.value.trim() === "Delete") {
-      ev.preventDefault();
+// Enable/disable delete confirm button and handle Enter key (delegated)
+document.addEventListener("input", (e) => {
+  const input = e.target;
+  if (!input || input.id !== "delete-user-typing") return;
+  const deleteUserConfirmBtn = document.getElementById("delete-user-confirm-btn");
+  if (deleteUserConfirmBtn) {
+    deleteUserConfirmBtn.disabled = input.value.trim() !== "Delete";
+  }
+});
+
+document.addEventListener("keydown", (e) => {
+  const input = e.target;
+  if (!input || input.id !== "delete-user-typing") return;
+  if (e.key === "Enter") {
+    e.preventDefault();
+    if (input.value.trim() === "Delete") {
       performDeleteUser();
     }
-  });
-}
+  }
+});
 
-if (deleteUserConfirmBtn) {
-  deleteUserConfirmBtn.addEventListener("click", () => {
-    if (deleteUserTypingEl && deleteUserTypingEl.value.trim() === "Delete") {
-      performDeleteUser();
-    }
-  });
-}
+document.addEventListener("hidden.bs.modal", (event) => {
+  const target = event.target;
+  if (!target || target.id !== "deleteUserModal") return;
+  const deleteUserTypingEl = document.getElementById("delete-user-typing");
+  const deleteUserConfirmBtn = document.getElementById("delete-user-confirm-btn");
+  pendingDeleteUserId = null;
+  pendingDeleteUserName = null;
+  if (deleteUserTypingEl) deleteUserTypingEl.value = "";
+  if (deleteUserConfirmBtn) deleteUserConfirmBtn.disabled = true;
+});
 
-if (deleteUserModalEl) {
-  deleteUserModalEl.addEventListener("hidden.bs.modal", () => {
-    pendingDeleteUserId = null;
-    pendingDeleteUserName = null;
-    if (deleteUserTypingEl) deleteUserTypingEl.value = "";
-    if (deleteUserConfirmBtn) deleteUserConfirmBtn.disabled = true;
-  });
-}
+// Dynamic change handlers for role + page access radios
+document.addEventListener("change", (e) => {
+  const target = e.target;
+  if (!target) return;
+  if (target.id === "user-role") {
+    syncPageAccessVisibility();
+  }
+  if (target.id === "user-page-access-selected" || target.id === "user-page-access-all") {
+    syncPageCheckboxesVisibility();
+  }
+});
 
-if (roleInput) {
-  roleInput.addEventListener("change", syncPageAccessVisibility);
-}
-if (pageAccessSelected) {
-  pageAccessSelected.addEventListener("change", syncPageCheckboxesVisibility);
-}
-if (pageAccessAll) {
-  pageAccessAll.addEventListener("change", syncPageCheckboxesVisibility);
-}
+// Form submit handler (works even if form is added later)
+document.addEventListener("submit", async (e) => {
+  const form = e.target;
+  if (!(form instanceof HTMLFormElement)) return;
+  if (form.id !== "user-form") return;
 
-if (modalEl) {
-  modalEl.addEventListener("show.bs.modal", (event) => {
-    const button = event.relatedTarget;
-    if (button && button.id === "add-user-btn") {
-      openAddModal();
-    } else {
-      syncPageAccessVisibility();
-      syncPageCheckboxesVisibility();
-    }
-  });
-}
-
-if (userForm) {
-  userForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     clearAlert();
 
-    const id = idInput.value;
-    const name = nameInput.value.trim();
-    const username = usernameInput.value.trim();
-    const email = emailInput ? emailInput.value.trim() : "";
-    const role = roleInput.value;
-    const password = passwordInput.value;
+  const idInputEl = document.getElementById("user-id");
+  const nameInputEl = document.getElementById("user-name");
+  const usernameInputEl = document.getElementById("user-username");
+  const emailInputEl = document.getElementById("user-email");
+  const roleInputEl = document.getElementById("user-role");
+  const passwordInputEl = document.getElementById("user-password");
+
+  if (!idInputEl || !nameInputEl || !usernameInputEl || !roleInputEl || !passwordInputEl) {
+    return;
+  }
+
+  const id = idInputEl.value;
+  const name = nameInputEl.value.trim();
+  const username = usernameInputEl.value.trim();
+  const email = emailInputEl ? emailInputEl.value.trim() : "";
+  const role = roleInputEl.value;
+  const password = passwordInputEl.value;
 
     if (!name || !username) {
       showAlert("Name and username are required.", "warning");
       return;
     }
 
-    const token = localStorage.getItem("sm_token");
-    if (!token) {
-      window.location.href = "/";
-      return;
+  const token = localStorage.getItem("sm_token");
+  if (!token) {
+    window.location.href = "/";
+    return;
+  }
+
+  const payload = { name, username, email: email || null, role };
+  if (role === "staff") {
+    payload.allowed_pages = getSelectedPageAccess();
+  } else {
+    payload.allowed_pages = null;
+  }
+  if (!id || (id && password.trim() !== "")) {
+    payload.password = password;
+  }
+
+  const modalEl = document.getElementById("userModal");
+
+  try {
+    const res = await fetch(id ? `${USERS_BASE}/${id}` : USERS_BASE, {
+      method: id ? "PUT" : "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const data = await res.json().catch(() => ({}));
+
+    if (!res.ok) {
+      throw new Error(data.message || "Failed to save user.");
     }
 
-    const payload = { name, username, email: email || null, role };
-    if (role === "staff") {
-      payload.allowed_pages = getSelectedPageAccess();
-    } else {
-      payload.allowed_pages = null;
-    }
-    if (!id || (id && password.trim() !== "")) {
-      payload.password = password;
-    }
-
-    try {
-      const res = await fetch(id ? `${USERS_BASE}/${id}` : USERS_BASE, {
-        method: id ? "PUT" : "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify(payload),
-      });
-
-      const data = await res.json().catch(() => ({}));
-
-      if (!res.ok) {
-        throw new Error(data.message || "Failed to save user.");
-      }
-
-      if (!bootstrapModal) {
+    if (modalEl) {
+      const currentEl = bootstrapModal && bootstrapModal._element;
+      if (!bootstrapModal || currentEl !== modalEl) {
         bootstrapModal = new bootstrap.Modal(modalEl);
       }
       bootstrapModal.hide();
-      showAlert("User saved successfully.", "success");
-      loadUsers();
-    } catch (err) {
-      showAlert(err.message || "Something went wrong.", "danger");
     }
-  });
-}
+    showAlert("User saved successfully.", "success");
+    loadUsers();
+  } catch (err) {
+    showAlert(err.message || "Something went wrong.", "danger");
+  }
+});
+
+// Ensure add/edit modal fields are initialized correctly when the modal is shown
+document.addEventListener("show.bs.modal", (event) => {
+  const target = event.target;
+  if (!target || target.id !== "userModal") return;
+  const button = event.relatedTarget;
+  if (button && button.id === "add-user-btn") {
+    openAddModal();
+  } else {
+    syncPageAccessVisibility();
+    syncPageCheckboxesVisibility();
+  }
+});
 
 function initUsersPage() {
   if (!document.body || document.body.dataset.page !== "users") return;
-  if (usersInitialized) return;
-  usersInitialized = true;
   loadUsers();
 }
 
@@ -414,11 +484,12 @@ initUsersPage();
 // Fallback: if page flag is set slightly later, poll briefly and init once
 let usersInitPollCount = 0;
 const usersInitPoll = setInterval(() => {
-  if (usersInitialized || usersInitPollCount++ > 10) {
+  if (usersInitPollCount++ > 10) {
     clearInterval(usersInitPoll);
     return;
   }
   if (document.body && document.body.dataset.page === "users") {
+    clearInterval(usersInitPoll);
     initUsersPage();
   }
 }, 200);

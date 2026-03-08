@@ -96,10 +96,8 @@ function createWindow() {
       mainWindow = null;
     });
 
-    // open DevTools in development
-    if (process.env.NODE_ENV === "development") {
-      mainWindow.webContents.openDevTools();
-    }
+    // Always open DevTools to make debugging easier (you can close them manually).
+    mainWindow.webContents.openDevTools({ mode: "detach" });
   } catch (err) {
     showError("Window Creation Error", `Failed to create window: ${err.message}`);
     throw err;

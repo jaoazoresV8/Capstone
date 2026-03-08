@@ -106,6 +106,12 @@ if (tableCount.n === 0) {
     if (e && !/duplicate column name/i.test(String(e.message))) console.warn("[db] Migration payment_method:", e.message);
   }
   try {
+    db.exec("ALTER TABLE products ADD COLUMN recorded_by_name TEXT");
+    console.log("[db] Added column products.recorded_by_name");
+  } catch (e) {
+    if (e && !/duplicate column name/i.test(String(e.message))) console.warn("[db] Migration products.recorded_by_name:", e.message);
+  }
+  try {
     db.exec("UPDATE payments SET payment_method = reference_number WHERE payment_method IS NULL AND reference_number IN ('cash','gcash','paymaya')");
   } catch (_) {}
   // Ensure activity_log exists (for dashboard overview)

@@ -1,5 +1,6 @@
 
 import { API_ORIGIN } from "./config.js";
+import { enqueueSyncOperation, getSaleUuidForLocalId } from "./sync-queue.js";
 const PAYMENTS_API = `${API_ORIGIN}/api/sales/payments`;
 const SALES_API = `${API_ORIGIN}/api/sales`;
 
@@ -107,6 +108,18 @@ function renderPaymentsRows(payments) {
     html += "</tr>";
   });
   tbody.innerHTML = html;
+
+  // If the Payments page is using card/kanban view, notify the generic
+  // view-toggle helper so it can rebuild the currently active layout
+  // from the updated table rows (search/filter results).
+  try {
+    const section = document.querySelector('.data-view-section[data-view-id="payments"]');
+    if (section && typeof CustomEvent === "function") {
+      section.dispatchEvent(new CustomEvent("data-view:refresh"));
+    }
+  } catch (_) {
+    // Ignore; table view will still render correctly.
+  }
 }
 
 function filterPayments(query, modeFilter) {
@@ -403,7 +416,7 @@ document.addEventListener("click", function (e) {
       if (!r.ok) return r.json().then(function (d) { return Promise.reject(new Error(d.message || "Failed to record payment.")); });
       return r.json();
     })
-    .then(function () {
+    .then(function (data) {
       const modalEl = document.getElementById("recordPaymentModal");
       if (modalEl) {
         const m = bootstrap.Modal.getInstance(modalEl);
@@ -411,6 +424,26 @@ document.addEventListener("click", function (e) {
       }
       loadPayments();
       alert("Payment recorded successfully.");
+
+      // Queue payment sync operation so central can update balances.
+      try {
+        const saleUuid = getSaleUuidForLocalId(saleIdToUse);
+        enqueueSyncOperation({
+          entityType: "payment",
+          operation: "create",
+          entityId: saleIdToUse,
+          localId: null,
+          data: {
+            sale_id: saleIdToUse,
+            sale_uuid: saleUuid || undefined,
+            amount_paid: amountRounded,
+            payment_method: paymentMethod,
+            reference_number: referenceNumber || undefined,
+          },
+        });
+      } catch (_) {
+        // Ignore queue errors; local payment has already been recorded.
+      }
     })
     .catch(function (err) {
       alert(err.message || "Failed to record payment.");

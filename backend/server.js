@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
+import bcrypt from "bcryptjs";
 
 import authRouter from "./routes/authRoutes.js";
 import userRouter from "./routes/userRoutes.js";
@@ -29,34 +30,81 @@ dotenv.config({ path: path.join(__dirname, "..", ".env") });
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Get app path - works in both dev and packaged Electron
-function getFrontendDir() {
+async function getClientIdSetting() {
+  const fallback = (process.env.CLIENT_ID || "").trim() || "client";
+  try {
+    const [rows] = await pool.query(
+      "SELECT setting_value FROM settings WHERE setting_key = 'client_id'"
+    );
+    const v = rows && rows.length ? String(rows[0].setting_value || "").trim() : "";
+    return v || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+async function getCentralBaseUrl() {
+  const envVal = (process.env.CENTRAL_API_URL || "").trim();
+  try {
+    const [rows] = await pool.query(
+      "SELECT setting_value FROM settings WHERE setting_key = 'central_api_url'"
+    );
+    const dbVal =
+      rows && rows.length ? String(rows[0].setting_value || "").trim() : "";
+    const raw = dbVal || envVal;
+    return raw.replace(/\/+$/, "");
+  } catch {
+    return envVal.replace(/\/+$/, "");
+  }
+}
+
+// Get app paths - works in both dev and packaged Electron
+function getAppPaths() {
   const appPath = path.join(__dirname, "..");
-  
+
+  // Default locations (development or unpacked asar)
+  const paths = {
+    appPath,
+    frontendDir: path.join(appPath, "frontend"),
+    nodeModulesDir: path.join(appPath, "node_modules"),
+  };
+
   // Check if running in Electron packaged app
-  if (typeof process !== 'undefined' && process.versions && process.versions.electron) {
+  if (typeof process !== "undefined" && process.versions && process.versions.electron) {
     // In packaged Electron, files are in app.asar
     // Path resolution works automatically with ASAR
     const asarFrontend = path.join(appPath, "frontend");
     if (fs.existsSync(asarFrontend)) {
-      return asarFrontend;
+      paths.frontendDir = asarFrontend;
+    } else {
+      // Fallback: check unpacked location
+      const unpackedFrontend = path.join(appPath, "..", "app.asar.unpacked", "frontend");
+      if (fs.existsSync(unpackedFrontend)) {
+        paths.frontendDir = unpackedFrontend;
+      }
     }
-    // Fallback: check unpacked location
-    const unpackedFrontend = path.join(appPath, "..", "app.asar.unpacked", "frontend");
-    if (fs.existsSync(unpackedFrontend)) {
-      return unpackedFrontend;
+
+    // Node modules are packaged alongside the app
+    const asarNodeModules = path.join(appPath, "node_modules");
+    if (fs.existsSync(asarNodeModules)) {
+      paths.nodeModulesDir = asarNodeModules;
+    } else {
+      const unpackedNodeModules = path.join(appPath, "..", "app.asar.unpacked", "node_modules");
+      if (fs.existsSync(unpackedNodeModules)) {
+        paths.nodeModulesDir = unpackedNodeModules;
+      }
     }
   }
-  
-  // Development mode or files in asar
-  return path.join(appPath, "frontend");
+
+  return paths;
 }
 
-const frontendDir = getFrontendDir();
+const { frontendDir, nodeModulesDir } = getAppPaths();
 
 // Log paths for debugging (only in Electron)
-if (typeof process !== 'undefined' && process.versions && process.versions.electron) {
+if (typeof process !== "undefined" && process.versions && process.versions.electron) {
   console.log("Frontend dir:", frontendDir);
+  console.log("Node modules dir:", nodeModulesDir);
   console.log("__dirname:", __dirname);
 }
 
@@ -71,8 +119,7 @@ app.use("/api/reports", reportRouter);
 
 // Simple sync/central status endpoint for frontend navbar indicator
 app.get("/api/client-sync-status", async (req, res) => {
-  const centralUrlRaw = process.env.CENTRAL_API_URL || "";
-  const centralUrl = centralUrlRaw.trim().replace(/\/+$/, "");
+  const centralUrl = await getCentralBaseUrl();
   const base = {
     mode: centralUrl ? "central" : "local",
     centralConfigured: Boolean(centralUrl),
@@ -112,14 +159,18 @@ app.get("/api/client-sync-status", async (req, res) => {
 
 // Background worker: push local change_log entries to central AdminServer when available
 function startCentralSyncWorker() {
-  const centralUrlRaw = process.env.CENTRAL_API_URL || "";
-  const centralUrl = centralUrlRaw.trim().replace(/\/+$/, "");
-  if (!centralUrl) return;
-
   const INTERVAL_MS = 7000;
 
+  let pushErrorLogged = false;
+
   const tick = async () => {
+    let hadError = false;
     try {
+      const centralUrl = await getCentralBaseUrl();
+      if (!centralUrl) {
+        pushErrorLogged = false;
+        return;
+      }
       const [rows] = await pool.query(
         "SELECT setting_value FROM settings WHERE setting_key = 'central_last_pushed_change_id'"
       );
@@ -145,8 +196,9 @@ function startCentralSyncWorker() {
         })(),
       }));
 
+      const clientId = await getClientIdSetting();
       const body = {
-        clientId: process.env.CLIENT_ID || "client",
+        clientId,
         operations,
       };
 
@@ -176,24 +228,486 @@ function startCentralSyncWorker() {
         `[CentralSync] pushed ${changes.length} change(s), now at id ${maxId}`
       );
     } catch (e) {
-      console.error("[CentralSync] error during push:", e?.message || e);
+      hadError = true;
+      if (!pushErrorLogged) {
+        console.error("[CentralSync] error during push:", e?.message || e);
+        pushErrorLogged = true;
+      }
+    } finally {
+      if (!hadError) {
+        pushErrorLogged = false;
+      }
     }
   };
 
   setInterval(tick, INTERVAL_MS);
 }
 
-// Optional pull worker: tracks central change_log progress and is ready for
-// applying server-originated changes into the local SQLite database in future.
-function startCentralPullWorker() {
-  const centralUrlRaw = process.env.CENTRAL_API_URL || "";
-  const centralUrl = centralUrlRaw.trim().replace(/\/+$/, "");
-  if (!centralUrl) return;
+async function applyCentralChangeToLocal(change, payload) {
+  if (!change || !payload) return;
 
+  let data = payload;
+  if (data && typeof data === "object" && data.data && typeof data.data === "object") {
+    data = data.data;
+  }
+  if (!data || typeof data !== "object") return;
+
+  const entityType = String(change.entity_type || "").toLowerCase();
+  const op = String(change.operation || "").toLowerCase();
+  if (!entityType || !op) return;
+
+  try {
+    switch (entityType) {
+      case "user": {
+        const id = data.id ?? data.user_id;
+        if (!id) return;
+
+        const name = data.name ?? null;
+        const username = data.username ?? null;
+        const email = data.email ?? null;
+        const role = data.role ?? "staff";
+        const incomingPasswordHash =
+          (typeof data.password_hash === "string" && data.password_hash.trim() !== "")
+            ? data.password_hash.trim()
+            : null;
+
+        let allowedPagesStr = null;
+        if (Array.isArray(data.allowed_pages)) {
+          allowedPagesStr = data.allowed_pages
+            .map((p) => String(p).trim())
+            .filter(Boolean)
+            .join(",");
+        } else if (typeof data.allowed_pages === "string") {
+          const trimmed = data.allowed_pages.trim();
+          allowedPagesStr = trimmed !== "" ? trimmed : null;
+        }
+
+        if (op === "delete" || op === "remove") {
+          // Mirror a cascade-like delete for local SQLite so central deletions
+          // are fully reflected on the client.
+          try {
+            await pool.query(
+              "DELETE FROM password_reset_requests WHERE user_id = ? OR resolved_by = ?",
+              [id, id]
+            );
+          } catch (_) {}
+          try {
+            await pool.query(
+              "DELETE FROM sale_issues WHERE cashier_id = ? OR resolved_by_admin_id = ?",
+              [id, id]
+            );
+          } catch (_) {}
+
+          await pool.query("DELETE FROM users WHERE user_id = ?", [id]);
+          break;
+        }
+
+        const [existingRows] = await pool.query(
+          "SELECT user_id, password_hash FROM users WHERE user_id = ? LIMIT 1",
+          [id]
+        );
+        const existing = Array.isArray(existingRows) ? existingRows : [];
+
+        if (existing.length > 0) {
+          const currentPasswordHash = existing[0].password_hash || null;
+
+          // If central sends a password_hash, keep local in sync; otherwise preserve existing.
+          if (incomingPasswordHash && incomingPasswordHash !== currentPasswordHash) {
+            await pool.query(
+              "UPDATE users SET name = ?, username = ?, email = ?, role = ?, allowed_pages = ?, password_hash = ? WHERE user_id = ?",
+              [name, username, email, role, allowedPagesStr, incomingPasswordHash, id]
+            );
+          } else {
+            await pool.query(
+              "UPDATE users SET name = ?, username = ?, email = ?, role = ?, allowed_pages = ? WHERE user_id = ?",
+              [name, username, email, role, allowedPagesStr, id]
+            );
+          }
+        } else {
+          // New user coming from central.
+          if (incomingPasswordHash) {
+            // If central provides a hash, reuse it so passwords match.
+            await pool.query(
+              "INSERT INTO users (user_id, name, username, email, password_hash, role, allowed_pages, created_at) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))",
+              [id, name, username, email, incomingPasswordHash, role, allowedPagesStr]
+            );
+          } else {
+            // Fallback: generate a local password hash to satisfy NOT NULL.
+            const tempPassword = "CentralTemp123!";
+            const salt = await bcrypt.genSalt(10);
+            const passwordHash = await bcrypt.hash(tempPassword, salt);
+
+            await pool.query(
+              "INSERT INTO users (user_id, name, username, email, password_hash, role, allowed_pages, created_at) " +
+                "VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))",
+              [id, name, username, email, passwordHash, role, allowedPagesStr]
+            );
+          }
+        }
+
+        break;
+      }
+      case "supplier": {
+        const id = data.id ?? data.supplier_id;
+        if (!id) return;
+        const name = data.name ?? null;
+        const contact = data.contact ?? null;
+        const address = data.address ?? null;
+        await pool.query(
+          "INSERT INTO suppliers (supplier_id, name, contact, address) VALUES (?, ?, ?, ?) " +
+            "ON CONFLICT(supplier_id) DO UPDATE SET name = excluded.name, contact = excluded.contact, address = excluded.address",
+          [id, name, contact, address]
+        );
+        break;
+      }
+      case "product": {
+        const id = data.id ?? data.product_id;
+        if (!id) return;
+        const name = data.name ?? null;
+        const category = data.category ?? null;
+        const supplierId = data.supplier_id ?? null;
+        const supplierPrice = data.supplier_price ?? 0;
+        const sellingPrice = data.selling_price ?? 0;
+        const stockQty = data.stock_quantity ?? 0;
+        const recordedAt = data.recorded_at ?? null;
+        const recordedBy = data.recorded_by ?? null;
+        const recordedByName =
+          (typeof data.recorded_by_name === "string" && data.recorded_by_name.trim() !== "")
+            ? data.recorded_by_name.trim()
+            : null;
+        await pool.query(
+          "INSERT INTO products (product_id, name, category, supplier_id, supplier_price, selling_price, stock_quantity, recorded_at, recorded_by, recorded_by_name) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+            "ON CONFLICT(product_id) DO UPDATE SET " +
+            "name = excluded.name, category = excluded.category, supplier_id = excluded.supplier_id, " +
+            "supplier_price = excluded.supplier_price, selling_price = excluded.selling_price, stock_quantity = excluded.stock_quantity, " +
+            "recorded_at = COALESCE(excluded.recorded_at, products.recorded_at), " +
+            "recorded_by = COALESCE(excluded.recorded_by, products.recorded_by), " +
+            "recorded_by_name = COALESCE(excluded.recorded_by_name, products.recorded_by_name)",
+          [id, name, category, supplierId, supplierPrice, sellingPrice, stockQty, recordedAt, recordedBy, recordedByName]
+        );
+        break;
+      }
+      case "customer": {
+        const id = data.id ?? data.customer_id;
+        if (!id) return;
+        const name = data.name ?? null;
+        const contact = data.contact ?? null;
+        const address = data.address ?? null;
+        const totalBalance = data.total_balance ?? 0;
+        await pool.query(
+          "INSERT INTO customers (customer_id, name, contact, address, total_balance) VALUES (?, ?, ?, ?, ?) " +
+            "ON CONFLICT(customer_id) DO UPDATE SET " +
+            "name = excluded.name, contact = excluded.contact, address = excluded.address, total_balance = excluded.total_balance",
+          [id, name, contact, address, totalBalance]
+        );
+        break;
+      }
+      case "settings": {
+        const pct = data.markup_percent != null ? parseFloat(data.markup_percent) : NaN;
+        if (isNaN(pct) || pct < 0 || pct > 999) break;
+        const val = String(Math.round(pct * 100) / 100);
+        await pool.query(
+          "INSERT INTO settings (setting_key, setting_value) VALUES ('markup_percent', ?) ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value",
+          [val]
+        );
+        await pool.query(
+          "UPDATE products SET selling_price = ROUND(supplier_price * (1 + ? / 100), 2)",
+          [pct]
+        );
+        break;
+      }
+      case "password_reset": {
+        const id = data.id ?? data.request_id;
+        if (!id) return;
+
+        const userId = data.user_id ?? null;
+        const username = data.username ?? null;
+        const status =
+          typeof data.status === "string" && data.status
+            ? data.status
+            : op === "delete"
+            ? "resolved"
+            : "pending";
+        const resolvedBy = data.resolved_by ?? null;
+        const resolutionNote = data.resolution_note ?? null;
+
+        if (op === "delete" || status === "deleted") {
+          await pool.query(
+            "DELETE FROM password_reset_requests WHERE request_id = ?",
+            [id]
+          );
+          break;
+        }
+
+        if (status === "resolved" || status === "rejected") {
+          await pool.query(
+            `UPDATE password_reset_requests
+             SET status = ?, resolved_at = datetime('now','localtime'),
+                 resolved_by = ?, resolution_note = ?
+             WHERE request_id = ?`,
+            [status, resolvedBy, resolutionNote, id]
+          );
+        } else {
+          await pool.query(
+            `INSERT INTO password_reset_requests (request_id, user_id, username, requested_at, status)
+             VALUES (?, ?, ?, datetime('now','localtime'), ?)
+             ON CONFLICT(request_id) DO UPDATE SET
+               user_id = excluded.user_id,
+               username = excluded.username,
+               status = excluded.status`,
+            [id, userId, username, status]
+          );
+        }
+
+        break;
+      }
+      case "sale": {
+        const id = data.id ?? data.sale_id;
+        const saleId = Number(id);
+        if (!Number.isFinite(saleId) || saleId <= 0) break;
+
+        const customerId =
+          data.customer_id != null && data.customer_id !== ""
+            ? Number(data.customer_id)
+            : null;
+        const transactionType =
+          typeof data.transaction_type === "string" && data.transaction_type
+            ? data.transaction_type
+            : "walk-in";
+        const customerName =
+          typeof data.walk_in_customer_name === "string" &&
+          data.walk_in_customer_name.trim()
+            ? data.walk_in_customer_name.trim()
+            : typeof data.customer_name === "string" &&
+              data.customer_name.trim()
+            ? data.customer_name.trim()
+            : null;
+        const customerContact =
+          data.customer_contact != null
+            ? String(data.customer_contact).trim() || null
+            : data.contact != null
+            ? String(data.contact).trim() || null
+            : null;
+        const customerAddress =
+          typeof data.customer_address === "string" &&
+          data.customer_address.trim()
+            ? data.customer_address.trim()
+            : typeof data.address === "string" && data.address.trim()
+            ? data.address.trim()
+            : null;
+        const paymentMethodRaw = data.payment_method;
+        const paymentReferenceRaw = data.reference_number;
+        const orNumber =
+          data.or_number != null && String(data.or_number).trim()
+            ? String(data.or_number).trim()
+            : null;
+        const totalAmount = Number(data.total_amount) || 0;
+        const amountPaid = Number(data.amount_paid) || 0;
+        const remainingBalance = Number(data.remaining_balance) || 0;
+
+        let status =
+          typeof data.status === "string" && data.status
+            ? data.status
+            : "unpaid";
+        if (!data.status) {
+          if (remainingBalance <= 0 && (totalAmount > 0 || amountPaid > 0)) {
+            status = "paid";
+          } else if (amountPaid > 0) {
+            status = "partial";
+          }
+        }
+
+        const saleDate =
+          typeof data.sale_date === "string" && data.sale_date.trim()
+            ? data.sale_date.trim()
+            : null;
+
+        // Ensure referenced customer exists locally to avoid FOREIGN KEY failures.
+        if (customerId) {
+          const totalBalance =
+            data.total_balance != null
+              ? Number(data.total_balance) || 0
+              : 0;
+          await pool.query(
+            "INSERT INTO customers (customer_id, name, contact, address, total_balance) VALUES (?, ?, ?, ?, ?) " +
+              "ON CONFLICT(customer_id) DO UPDATE SET " +
+              "name = excluded.name, contact = excluded.contact, address = excluded.address",
+            [
+              customerId,
+              customerName || null,
+              customerContact,
+              customerAddress,
+              totalBalance,
+            ]
+          );
+        }
+
+        await pool.query(
+          `INSERT INTO sales (
+             sale_id,
+             customer_id,
+             transaction_type,
+             customer_name,
+             or_number,
+             total_amount,
+             amount_paid,
+             remaining_balance,
+             status,
+             sale_date
+           )
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now','localtime')))
+           ON CONFLICT(sale_id) DO UPDATE SET
+             customer_id = excluded.customer_id,
+             transaction_type = excluded.transaction_type,
+             customer_name = excluded.customer_name,
+             or_number = excluded.or_number,
+             total_amount = excluded.total_amount,
+             amount_paid = excluded.amount_paid,
+             remaining_balance = excluded.remaining_balance,
+             status = excluded.status,
+             sale_date = excluded.sale_date`,
+          [
+            saleId,
+            customerId,
+            transactionType,
+            customerName,
+            orNumber,
+            totalAmount,
+            amountPaid,
+            remainingBalance,
+            status,
+            saleDate,
+          ]
+        );
+
+        const items = Array.isArray(data.items) ? data.items : [];
+        await pool.query("DELETE FROM sale_items WHERE sale_id = ?", [saleId]);
+        for (const item of items) {
+          const productId =
+            item.product_id != null && item.product_id !== ""
+              ? Number(item.product_id)
+              : null;
+          if (!Number.isFinite(productId) || productId <= 0) continue;
+          const qty = Number(item.quantity) || 0;
+          const price = Number(item.price) || 0;
+          const subtotal = Number(item.subtotal) || qty * price;
+          if (qty <= 0) continue;
+          await pool.query(
+            "INSERT INTO sale_items (sale_id, product_id, quantity, price, subtotal) VALUES (?, ?, ?, ?, ?)",
+            [saleId, productId, qty, price, subtotal]
+          );
+        }
+
+        // Keep local payments table consistent with central's sale amount_paid.
+        try {
+          const [[sumRow]] = await pool.query(
+            "SELECT COALESCE(SUM(amount_paid), 0) AS total_paid FROM payments WHERE sale_id = ?",
+            [saleId]
+          );
+          const localTotalPaid = Number(sumRow?.total_paid || 0);
+
+          // Normalize payment method; fall back to 'cash' if not provided.
+          const rawMethod =
+            typeof paymentMethodRaw === "string" && paymentMethodRaw.trim()
+              ? paymentMethodRaw.trim().toLowerCase()
+              : "";
+          const allowedMethods = new Set(["cash", "gcash", "paymaya", "credit"]);
+          const normalizedMethod = allowedMethods.has(rawMethod) ? rawMethod : "cash";
+
+          // Prefer explicit reference_number from central; otherwise use method name.
+          const referenceNumber =
+            paymentReferenceRaw != null && String(paymentReferenceRaw).trim()
+              ? String(paymentReferenceRaw).trim()
+              : normalizedMethod;
+
+          if (amountPaid <= 0) {
+            if (localTotalPaid > 0) {
+              await pool.query("DELETE FROM payments WHERE sale_id = ?", [saleId]);
+            }
+          } else if (Math.abs(localTotalPaid - amountPaid) > 0.005) {
+            // Replace local payments with a single aggregate row matching central's amount_paid.
+            await pool.query("DELETE FROM payments WHERE sale_id = ?", [saleId]);
+            await pool.query(
+              "INSERT INTO payments (sale_id, amount_paid, payment_date, reference_number, payment_method) VALUES (?, ?, datetime('now','localtime'), ?, ?)",
+              [saleId, amountPaid, referenceNumber, normalizedMethod]
+            );
+          }
+        } catch (e) {
+          console.error("[CentralSync] failed to reconcile payments for sale", saleId, e?.message || e);
+        }
+        break;
+      }
+      case "payment": {
+        const rawSaleId = data.sale_id ?? change.entity_id;
+        const saleId = Number(rawSaleId);
+        if (!Number.isFinite(saleId) || saleId <= 0) break;
+
+        const amount = Number(data.amount_paid) || 0;
+        if (amount <= 0) break;
+
+        const payMethod =
+          typeof data.payment_method === "string" && data.payment_method
+            ? data.payment_method
+            : "cash";
+        const referenceNumber =
+          data.reference_number != null && String(data.reference_number).trim()
+            ? String(data.reference_number).trim()
+            : null;
+        const paymentRef = referenceNumber || payMethod;
+
+        await pool.query(
+          "INSERT INTO payments (sale_id, amount_paid, payment_date, reference_number, payment_method) VALUES (?, ?, datetime('now','localtime'), ?, ?)",
+          [saleId, amount, paymentRef, payMethod]
+        );
+
+        const [[saleRow]] = await pool.query(
+          "SELECT amount_paid, total_amount, remaining_balance FROM sales WHERE sale_id = ?",
+          [saleId]
+        );
+        const currentPaid = saleRow ? Number(saleRow.amount_paid) || 0 : 0;
+        const currentRemaining = saleRow
+          ? Number(saleRow.remaining_balance) || 0
+          : 0;
+        const totalAmount = saleRow ? Number(saleRow.total_amount) || 0 : 0;
+
+        const newPaid = currentPaid + amount;
+        let newRemaining =
+          currentRemaining > 0
+            ? Math.max(0, currentRemaining - amount)
+            : Math.max(0, totalAmount - newPaid);
+        const status = newRemaining <= 0 ? "paid" : "partial";
+
+        await pool.query(
+          "UPDATE sales SET amount_paid = ?, remaining_balance = ?, status = ? WHERE sale_id = ?",
+          [newPaid, newRemaining, status, saleId]
+        );
+        break;
+      }
+      default:
+        return;
+    }
+  } catch (e) {
+    console.error("[CentralSync] failed to apply change:", entityType, op, e?.message || e);
+  }
+}
+
+// Pull worker: fetches central change_log entries and applies them into local SQLite.
+function startCentralPullWorker() {
   const INTERVAL_MS = 9000;
 
+  let pullErrorLogged = false;
+
   const tick = async () => {
+    let hadError = false;
     try {
+      const centralUrl = await getCentralBaseUrl();
+      if (!centralUrl) {
+        pullErrorLogged = false;
+        return;
+      }
+      const thisClientId = await getClientIdSetting();
       const [rows] = await pool.query(
         "SELECT setting_value FROM settings WHERE setting_key = 'central_last_pulled_change_id'"
       );
@@ -236,15 +750,12 @@ function startCentralPullWorker() {
         const sourceClientId =
           payload && typeof payload === "object" ? payload.clientId : null;
 
-        // For now, ignore changes that were pushed by any client instance.
-        // This avoids conflicting primary keys between independent local SQLite databases.
-        if (sourceClientId) {
+        // Skip operations that originated from this same client (we already applied them locally).
+        if (sourceClientId && sourceClientId === thisClientId) {
           continue;
         }
 
-        // If the AdminServer later records its own authoritative changes into
-        // change_log without a clientId, this is where we would apply those
-        // operations into the local SQLite database in an idempotent way.
+        await applyCentralChangeToLocal(change, payload);
       }
 
       if (maxId > lastId) {
@@ -254,7 +765,15 @@ function startCentralPullWorker() {
         );
       }
     } catch (e) {
-      console.error("[CentralSync] error during pull:", e?.message || e);
+      hadError = true;
+      if (!pullErrorLogged) {
+        console.error("[CentralSync] error during pull:", e?.message || e);
+        pullErrorLogged = true;
+      }
+    } finally {
+      if (!hadError) {
+        pullErrorLogged = false;
+      }
     }
   };
 
@@ -281,6 +800,26 @@ app.get("/.well-known/appspecific/com.chrome.devtools.json", (req, res) => {
 app.use("/js", express.static(path.join(frontendDir, "js")));
 app.use("/css", express.static(path.join(frontendDir, "css")));
 app.use(express.static(frontendDir));
+
+// Expose select vendor libraries (e.g. Chart.js) from node_modules
+if (fs.existsSync(nodeModulesDir)) {
+  // Lightweight debug logger so you can see Chart.js requests in the terminal.
+  app.use("/vendor", (req, res, next) => {
+    if (req.path.includes("chart.js")) {
+      console.log("[Static] Chart.js requested:", req.path);
+    }
+    next();
+  });
+
+  app.use(
+    "/vendor",
+    express.static(nodeModulesDir, {
+      // Extra safety: do not list directory contents
+      index: false,
+      redirect: false,
+    })
+  );
+}
 
 
 app.get("/", (req, res) => {

@@ -27,11 +27,11 @@ router.get("/overview", async (req, res) => {
     const outstandingBalance = balanceRows[0]?.total_balance || 0;
     const customersWithBalance = balanceRows[0]?.customers_with_balance || 0;
 
-    // Low stock items (<= 5)
+    // Low stock items (<= 10)
     const [lowStockRows] = await pool.query(
       `SELECT COUNT(*) AS low_stock_count
        FROM products
-       WHERE stock_quantity <= 5`
+       WHERE stock_quantity <= 10`
     );
     const lowStockCount = lowStockRows[0]?.low_stock_count || 0;
 

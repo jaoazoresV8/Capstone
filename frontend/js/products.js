@@ -531,7 +531,11 @@ function showRecordInfoModal(product) {
   const recordedAt = product.recorded_at
     ? new Date(product.recorded_at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "medium" })
     : "—";
-  const recordedBy = product.recorded_by_name || "—";
+  const recordedBy =
+    product.recorded_by_name ||
+    (product.recorded_by != null && String(product.recorded_by).trim() !== ""
+      ? `User #${product.recorded_by}`
+      : "—");
   bodyEl.innerHTML = `<p class="mb-1"><strong>Recorded at</strong><br/>${escapeHtml(String(recordedAt))}</p><p class="mb-0"><strong>Recorded by</strong><br/>${escapeHtml(recordedBy)}</p>`;
   const modal = new bootstrap.Modal(modalEl);
   modal.show();

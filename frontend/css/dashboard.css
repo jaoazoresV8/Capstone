@@ -25,6 +25,14 @@ body {
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 
+/* Electron: reserve space / avoid overlay scrollbar blocking right-side controls */
+html.is-electron {
+  scrollbar-gutter: stable;
+}
+html.is-electron .app-navbar .container-fluid {
+  padding-right: calc(0.75rem + 16px);
+}
+
 /* Smooth reveal: hide until DOM + nav ready, then fade in (reduces flicker) */
 body.page-loading {
   opacity: 0;
@@ -40,6 +48,22 @@ body:not(.page-loading) {
   min-height: calc(100vh - var(--dm-nav-height));
   padding-top: 1.5rem;
   padding-bottom: 2rem;
+}
+
+/* Reports page: keep charts at a reasonable height */
+body[data-page="reports"] .chart-card-body-lg,
+body[data-page="reports"] .chart-card-body-sm {
+  position: relative;
+}
+body[data-page="reports"] .chart-card-body-lg {
+  min-height: 260px;
+}
+body[data-page="reports"] .chart-card-body-sm {
+  min-height: 220px;
+}
+body[data-page="reports"] canvas {
+  width: 100% !important;
+  height: 100% !important;
 }
 
 /* Dashboard-only (overview) construction background image over whole page */
@@ -73,6 +97,9 @@ body[data-page="overview"] .app-main {
 
 /* ===== Navbar ===== */
 .app-navbar {
+  position: sticky;
+  top: 0;
+  z-index: 1030;
   background: linear-gradient(135deg, var(--dm-primary) 0%, var(--dm-primary-light) 100%) !important;
   box-shadow: var(--dm-shadow-md);
   min-height: var(--dm-nav-height);
@@ -202,21 +229,128 @@ body[data-page="overview"] .app-main {
   color: var(--dm-danger);
 }
 
-/* Sync status indicator (central / local) – visible on all pages via nav */
+/* Sync status indicator (central / local) – visible on all pages via nav; responsive in Electron */
 .nav-sync-indicator {
   color: rgba(255, 255, 255, 0.9);
-  font-size: 0.8rem;
+  font-size: clamp(0.65rem, 1.2vw + 0.5rem, 0.8rem);
   font-weight: 500;
   display: inline-flex;
   align-items: center;
-  gap: 0.4rem;
-  padding: 0.35rem 0.85rem;
+  gap: 0.35rem;
+  padding: 0.3rem 0.6rem;
+  max-width: min(100%, 240px);
+  min-width: 0;
   border-radius: 999px;
   background: rgba(15, 23, 42, 0.4);
   border: 1px solid rgba(255, 255, 255, 0.12);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
   transition: background 0.25s ease, box-shadow 0.25s ease, transform 0.2s ease;
 }
+.nav-sync-indicator #nav-sync-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* App settings modal: dot separator between Client ID and Central address */
+#appSettingsModal .nav-settings-sep {
+  /* Keep this separator "dot-free" so dots are reserved for IP notation. */
+  display: block;
+  width: 100%;
+  height: 1px;
+  background: rgba(148, 163, 184, 0.45);
+  border: 0;
+  border-radius: 999px;
+  user-select: none;
+  pointer-events: none;
+}
+#appSettingsModal .nav-settings-sep .nav-settings-sep-dot {
+  display: none !important;
+}
+
+/* App settings modal: IPv4 segmented input (Windows-style dots not editable) */
+#appSettingsModal .sm-central-addr {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: nowrap;
+}
+#appSettingsModal .sm-central-scheme {
+  width: 5.25rem;
+  flex: 0 0 auto;
+}
+#appSettingsModal .sm-central-scheme-sep,
+#appSettingsModal .sm-central-port-sep,
+#appSettingsModal .sm-ipv4-dot {
+  color: #94a3b8;
+  font-weight: 600;
+  user-select: none;
+  pointer-events: none;
+}
+#appSettingsModal .sm-ipv4-input {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+#appSettingsModal .sm-ipv4-octet,
+#appSettingsModal .sm-ipv4-port {
+  height: calc(1.5em + 0.5rem + 2px); /* bootstrap .form-control-sm-ish */
+  padding: 0.25rem 0.5rem;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  border: 1px solid var(--dm-border);
+  border-radius: 0.375rem;
+  background: #fff;
+  color: var(--dm-text);
+  outline: none;
+}
+#appSettingsModal .sm-ipv4-octet {
+  width: 3.1rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+#appSettingsModal .sm-ipv4-port {
+  width: 4.2rem;
+  text-align: center;
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+}
+#appSettingsModal .sm-ipv4-octet:focus,
+#appSettingsModal .sm-ipv4-port:focus,
+#appSettingsModal .sm-central-scheme:focus {
+  border-color: rgba(59, 130, 246, 0.7);
+  box-shadow: 0 0 0 0.2rem rgba(59, 130, 246, 0.2);
+}
+
+/* App settings modal: loading on Test Connection button (rotating logo + text) */
+#btn-test-central-connection.dm-test-loading {
+  cursor: wait;
+}
+
+#btn-test-central-connection .dm-test-connecting {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+#btn-test-central-connection .dm-test-connecting-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  border-radius: 4px;
+  image-rendering: auto;
+  animation: dm-ico-spin 1s linear infinite;
+}
+
+@keyframes dm-ico-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .nav-sync-indicator:hover {
   transform: translateY(-1px);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);

@@ -5,13 +5,24 @@ export function createIdempotencyMiddleware(pool) {
     const method = req.method?.toUpperCase?.() || "";
     if (!WRITE_METHODS.has(method)) return next();
 
-    const key =
+    let key =
       req.headers["idempotency-key"] ||
       req.headers["Idempotency-Key"] ||
       req.headers["x-idempotency-key"];
 
     if (!key || typeof key !== "string" || !key.trim()) {
-      return next();
+      const body = req.body || {};
+      const bodyKey =
+        (typeof body.transaction_uuid === "string" && body.transaction_uuid.trim()) ||
+        (typeof body.transactionId === "string" && body.transactionId.trim()) ||
+        (typeof body.uuid === "string" && body.uuid.trim()) ||
+        null;
+
+      if (!bodyKey) {
+        return next();
+      }
+
+      key = bodyKey;
     }
 
     const idemKey = key.trim();

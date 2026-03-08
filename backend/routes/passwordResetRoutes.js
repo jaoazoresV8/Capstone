@@ -7,6 +7,7 @@ import fs from "fs";
 import pool from "../db.js";
 import { authenticateToken, requireAdmin } from "../middleware/authMiddleware.js";
 import { sendMail } from "../utils/mailer.js";
+import { logChange } from "../changeLog.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const router = express.Router();
@@ -212,6 +213,21 @@ router.put("/requests/:id/resolve", async (req, res) => {
     );
 
     await conn.commit();
+
+    // Sync password change + reset resolution to central
+    await logChange("user", pr.user_id, "update", {
+      id: pr.user_id,
+      username: pr.username,
+      password_hash: passwordHash,
+    });
+    await logChange("password_reset", pr.request_id, "update", {
+      id: pr.request_id,
+      user_id: pr.user_id,
+      username: pr.username,
+      status: "resolved",
+      resolved_by: req.user.userId,
+      resolution_note: note || "Resolved via admin panel",
+    });
 
     const userName = pr.name || pr.username;
     const logoAttach = getLogoAttachment();

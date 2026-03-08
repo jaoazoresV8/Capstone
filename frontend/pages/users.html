@@ -79,149 +79,149 @@
           </div>
         </div>
       </div>
-    </main>
 
-    <!-- Add/Edit User Modal -->
-    <div
-      class="modal fade"
-      id="userModal"
-      tabindex="-1"
-      aria-labelledby="userModalLabel"
-      aria-hidden="true"
-    >
-      <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content">
-          <form id="user-form">
-            <div class="modal-header">
-              <h1 class="modal-title fs-6" id="userModalLabel">Add User</h1>
-              <button
-                type="button"
-                class="btn-close"
-                data-bs-dismiss="modal"
-                aria-label="Close"
-              ></button>
-            </div>
-            <div class="modal-body">
-              <input type="hidden" id="user-id" />
-              <div class="mb-2">
-                <label for="user-name" class="form-label small">Full Name</label>
-                <input
-                  type="text"
-                  class="form-control form-control-sm"
-                  id="user-name"
-                  required
-                />
+      <!-- Add/Edit User Modal (inside main so PJAX loads it when navigating to Users) -->
+      <div
+        class="modal fade"
+        id="userModal"
+        tabindex="-1"
+        aria-labelledby="userModalLabel"
+        aria-hidden="true"
+      >
+        <div class="modal-dialog modal-dialog-centered">
+          <div class="modal-content">
+            <form id="user-form">
+              <div class="modal-header">
+                <h1 class="modal-title fs-6" id="userModalLabel">Add User</h1>
+                <button
+                  type="button"
+                  class="btn-close"
+                  data-bs-dismiss="modal"
+                  aria-label="Close"
+                ></button>
               </div>
-              <div class="mb-2">
-                <label for="user-username" class="form-label small"
-                  >Username</label
-                >
-                <input
-                  type="text"
-                  class="form-control form-control-sm"
-                  id="user-username"
-                  required
-                />
-              </div>
-              <div class="mb-2">
-                <label for="user-email" class="form-label small">Email</label>
-                <input
-                  type="email"
-                  class="form-control form-control-sm"
-                  id="user-email"
-                  placeholder="name@example.com"
-                  autocomplete="email"
-                />
-                <div class="form-text small">
-                  Used for password reset requests.
+              <div class="modal-body">
+                <input type="hidden" id="user-id" />
+                <div class="mb-2">
+                  <label for="user-name" class="form-label small">Full Name</label>
+                  <input
+                    type="text"
+                    class="form-control form-control-sm"
+                    id="user-name"
+                    required
+                  />
                 </div>
-              </div>
-              <div class="mb-2">
-                <label for="user-role" class="form-label small">Role</label>
-                <select
-                  id="user-role"
-                  class="form-select form-select-sm"
-                  required
-                >
-                  <option value="staff">Staff</option>
-                  <option value="admin">Admin</option>
-                </select>
-              </div>
-              <div id="user-page-access-wrap" class="mb-2">
-                <label class="form-label small d-block">Page access</label>
-                <div class="d-flex flex-column gap-1">
-                  <label class="d-flex align-items-center gap-2 small text-muted">
-                    <input type="radio" name="user-page-access" value="all" id="user-page-access-all" class="form-check-input" />
-                    All pages
-                  </label>
-                  <label class="d-flex align-items-center gap-2 small text-muted">
-                    <input type="radio" name="user-page-access" value="selected" id="user-page-access-selected" class="form-check-input" />
-                    Selected pages only
-                  </label>
+                <div class="mb-2">
+                  <label for="user-username" class="form-label small"
+                    >Username</label
+                  >
+                  <input
+                    type="text"
+                    class="form-control form-control-sm"
+                    id="user-username"
+                    required
+                  />
                 </div>
-                <div id="user-page-checkboxes" class="mt-2 ps-3 border-start border-2 border-light d-none">
-                  <div class="d-flex flex-wrap gap-3 small">
-                    <label class="d-flex align-items-center gap-1"><input type="checkbox" class="form-check-input user-page-cb" value="overview" /> Overview</label>
-                    <label class="d-flex align-items-center gap-1"><input type="checkbox" class="form-check-input user-page-cb" value="products" /> Products</label>
-                    <label class="d-flex align-items-center gap-1"><input type="checkbox" class="form-check-input user-page-cb" value="customers" /> Customers</label>
-                    <label class="d-flex align-items-center gap-1"><input type="checkbox" class="form-check-input user-page-cb" value="sales" /> Sales</label>
-                    <label class="d-flex align-items-center gap-1"><input type="checkbox" class="form-check-input user-page-cb" value="payments" /> Payments</label>
-                    <label class="d-flex align-items-center gap-1"><input type="checkbox" class="form-check-input user-page-cb" value="reports" /> Reports</label>
+                <div class="mb-2">
+                  <label for="user-email" class="form-label small">Email</label>
+                  <input
+                    type="email"
+                    class="form-control form-control-sm"
+                    id="user-email"
+                    placeholder="name@example.com"
+                    autocomplete="email"
+                  />
+                  <div class="form-text small">
+                    Used for password reset requests.
+                  </div>
+                </div>
+                <div class="mb-2">
+                  <label for="user-role" class="form-label small">Role</label>
+                  <select
+                    id="user-role"
+                    class="form-select form-select-sm"
+                    required
+                  >
+                    <option value="staff">Staff</option>
+                    <option value="admin">Admin</option>
+                  </select>
+                </div>
+                <div id="user-page-access-wrap" class="mb-2">
+                  <label class="form-label small d-block">Page access</label>
+                  <div class="d-flex flex-column gap-1">
+                    <label class="d-flex align-items-center gap-2 small text-muted">
+                      <input type="radio" name="user-page-access" value="all" id="user-page-access-all" class="form-check-input" />
+                      All pages
+                    </label>
+                    <label class="d-flex align-items-center gap-2 small text-muted">
+                      <input type="radio" name="user-page-access" value="selected" id="user-page-access-selected" class="form-check-input" />
+                      Selected pages only
+                    </label>
+                  </div>
+                  <div id="user-page-checkboxes" class="mt-2 ps-3 border-start border-2 border-light d-none">
+                    <div class="d-flex flex-wrap gap-3 small">
+                      <label class="d-flex align-items-center gap-1"><input type="checkbox" class="form-check-input user-page-cb" value="overview" /> Overview</label>
+                      <label class="d-flex align-items-center gap-1"><input type="checkbox" class="form-check-input user-page-cb" value="products" /> Products</label>
+                      <label class="d-flex align-items-center gap-1"><input type="checkbox" class="form-check-input user-page-cb" value="customers" /> Customers</label>
+                      <label class="d-flex align-items-center gap-1"><input type="checkbox" class="form-check-input user-page-cb" value="sales" /> Sales</label>
+                      <label class="d-flex align-items-center gap-1"><input type="checkbox" class="form-check-input user-page-cb" value="payments" /> Payments</label>
+                      <label class="d-flex align-items-center gap-1"><input type="checkbox" class="form-check-input user-page-cb" value="reports" /> Reports</label>
+                    </div>
+                  </div>
+                </div>
+                <div class="mb-0">
+                  <label for="user-password" class="form-label small"
+                    >Password</label
+                  >
+                  <input
+                    type="password"
+                    class="form-control form-control-sm"
+                    id="user-password"
+                    placeholder="Set a password"
+                  />
+                  <div class="form-text small">
+                    Leave blank when editing if you don't want to change the
+                    password.
                   </div>
                 </div>
               </div>
-              <div class="mb-0">
-                <label for="user-password" class="form-label small"
-                  >Password</label
+              <div class="modal-footer">
+                <button
+                  type="button"
+                  class="btn btn-outline-secondary btn-sm"
+                  data-bs-dismiss="modal"
                 >
-                <input
-                  type="password"
-                  class="form-control form-control-sm"
-                  id="user-password"
-                  placeholder="Set a password"
-                />
-                <div class="form-text small">
-                  Leave blank when editing if you don't want to change the
-                  password.
-                </div>
+                  Cancel
+                </button>
+                <button type="submit" class="btn btn-primary btn-sm">
+                  Save
+                </button>
               </div>
+            </form>
+          </div>
+        </div>
+      </div>
+
+      <!-- Delete user confirmation modal (inside main so PJAX loads it when navigating to Users) -->
+      <div class="modal fade" id="deleteUserModal" tabindex="-1" aria-labelledby="deleteUserModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title fs-6" id="deleteUserModalLabel">Delete user</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+              <p class="mb-2 small text-muted" id="delete-user-message">Type <strong>Delete</strong> below to confirm.</p>
+              <input type="text" class="form-control form-control-sm" id="delete-user-typing" placeholder="Type Delete" autocomplete="off" />
             </div>
             <div class="modal-footer">
-              <button
-                type="button"
-                class="btn btn-outline-secondary btn-sm"
-                data-bs-dismiss="modal"
-              >
-                Cancel
-              </button>
-              <button type="submit" class="btn btn-primary btn-sm">
-                Save
-              </button>
+              <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+              <button type="button" class="btn btn-danger btn-sm" id="delete-user-confirm-btn" disabled>Confirm</button>
             </div>
-          </form>
-        </div>
-      </div>
-    </div>
-
-    <!-- Delete user confirmation modal -->
-    <div class="modal fade" id="deleteUserModal" tabindex="-1" aria-labelledby="deleteUserModalLabel" aria-hidden="true">
-      <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content">
-          <div class="modal-header">
-            <h5 class="modal-title fs-6" id="deleteUserModalLabel">Delete user</h5>
-            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-          </div>
-          <div class="modal-body">
-            <p class="mb-2 small text-muted" id="delete-user-message">Type <strong>Delete</strong> below to confirm.</p>
-            <input type="text" class="form-control form-control-sm" id="delete-user-typing" placeholder="Type Delete" autocomplete="off" />
-          </div>
-          <div class="modal-footer">
-            <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
-            <button type="button" class="btn btn-danger btn-sm" id="delete-user-confirm-btn" disabled>Confirm</button>
           </div>
         </div>
       </div>
-    </div>
+    </main>
 
     <script src="/js/bootstrap.bundle.min.js"></script>
     <script src="/js/app-navigation.js"></script>
