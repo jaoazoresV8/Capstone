@@ -163,6 +163,27 @@ if (tableCount.n === 0) {
     console.warn("[db] Failed to ensure sale_issues:", e?.message || e);
   }
 
+  // Performance indexes for common queries/searches
+  try {
+    db.exec(`
+      -- Products: search/filter/sort
+      CREATE INDEX IF NOT EXISTS idx_products_name ON products(name);
+      CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);
+      CREATE INDEX IF NOT EXISTS idx_products_recorded_at ON products(recorded_at);
+
+      -- Sales: date + status + customer for listing/filtering
+      CREATE INDEX IF NOT EXISTS idx_sales_sale_date ON sales(sale_date DESC, sale_id DESC);
+      CREATE INDEX IF NOT EXISTS idx_sales_status ON sales(status);
+      CREATE INDEX IF NOT EXISTS idx_sales_customer_name ON sales(customer_name);
+
+      -- Payments: by sale and date
+      CREATE INDEX IF NOT EXISTS idx_payments_sale_id ON payments(sale_id);
+      CREATE INDEX IF NOT EXISTS idx_payments_payment_date ON payments(payment_date DESC, payment_id DESC);
+    `);
+  } catch (e) {
+    console.warn("[db] Failed to create performance indexes:", e?.message || e);
+  }
+
   ensureChangeLog();
   ensureIdempotencyKeys();
 }

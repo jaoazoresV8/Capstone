@@ -2,6 +2,7 @@ import { API_ORIGIN } from "./config.js";
 
 const SYNC_PUSH_API = `${API_ORIGIN}/api/sync/push`;
 const SALE_MAPPING_API = `${API_ORIGIN}/api/sync/sale-mapping`;
+const APPLY_MAPPING_API = `${API_ORIGIN}/api/sync/apply-sale-mapping`;
 const SYNC_QUEUE_KEY = "sm_sync_queue";
 const CLIENT_ID_KEY = "sm_client_id";
 const SALE_UUID_MAP_KEY = "sm_sale_uuid_map";
@@ -173,6 +174,11 @@ export async function flushSyncQueue() {
       queue = queue.slice(batch.length);
       saveQueue(queue);
     }
+
+    // If we flushed everything, resolve receipt_no -> central OR number and update local sales.
+    if (!queue.length) {
+      await reconcileLocalSaleOrNumbers();
+    }
   } catch (err) {
     console.error("Sync flush error:", err);
   } finally {
@@ -223,6 +229,113 @@ export async function fetchSaleMappingByUuid(uuids) {
   return Array.isArray(data.mappings) ? data.mappings : [];
 }
 
+export async function fetchSaleMappingByReceiptNo(receiptNos) {
+  const list = Array.isArray(receiptNos) ? receiptNos : [receiptNos];
+  const filtered = list
+    .filter((r) => typeof r === "string" && r.trim())
+    .map((r) => r.trim());
+  if (!filtered.length) return [];
+  const qs = filtered.map((r) => encodeURIComponent(r)).join(",");
+  const url = `${SALE_MAPPING_API}?receipt_no=${qs}`;
+  const res = await fetch(url, { headers: authHeaders() });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.message || "Failed to load central sale mapping.");
+  }
+  return Array.isArray(data.mappings) ? data.mappings : [];
+}
+
+async function applyLocalSaleMapping(mappings) {
+  const filtered = (Array.isArray(mappings) ? mappings : [])
+    .map((m) => {
+      const receipt_no = m?.receipt_no ? String(m.receipt_no).trim() : "";
+      const or_number = m?.or_number ? String(m.or_number).trim() : "";
+      return receipt_no && or_number ? { receipt_no, or_number } : null;
+    })
+    .filter(Boolean);
+  if (!filtered.length) return;
+  await fetch(APPLY_MAPPING_API, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ mappings: filtered }),
+  }).catch(() => {});
+}
+
+async function reconcileLocalSaleOrNumbers() {
+  try {
+    const raw = localStorage.getItem(SALE_UUID_MAP_KEY);
+    if (!raw) return;
+    const map = JSON.parse(raw);
+    if (!map || typeof map !== "object") return;
+    const entries = Object.values(map).filter((v) => v && typeof v === "object");
+
+    const receiptNos = entries
+      .map((v) => v.receipt_no)
+      .filter((r) => typeof r === "string" && r.trim())
+      .map((r) => r.trim());
+    const saleUuids = entries
+      .map((v) => v.sale_uuid)
+      .filter((u) => typeof u === "string" && u.trim())
+      .map((u) => u.trim());
+
+    const uniqueReceiptNos = Array.from(new Set(receiptNos));
+    const uniqueUuids = Array.from(new Set(saleUuids));
+    if (!uniqueReceiptNos.length && !uniqueUuids.length) return;
+
+    // Prefer receipt_no mapping (stable across offline/online). If central returns nothing,
+    // fall back to sale_uuid mapping (some centrals expose only this lookup).
+    let mappings = [];
+    if (uniqueReceiptNos.length) {
+      try {
+        mappings = await fetchSaleMappingByReceiptNo(uniqueReceiptNos);
+      } catch (_) {
+        mappings = [];
+      }
+    }
+    if ((!mappings || !mappings.length) && uniqueUuids.length) {
+      try {
+        mappings = await fetchSaleMappingByUuid(uniqueUuids);
+      } catch (_) {
+        mappings = [];
+      }
+    }
+
+    // If central returned mappings without receipt_no (only sale_uuid), convert using our local map
+    // and apply locally.
+    const byUuid = new Map(entries.map((e) => [String(e.sale_uuid || "").trim(), e]));
+    const toApply = (mappings || [])
+      .map((m) => {
+        const receipt_no =
+          m?.receipt_no != null && String(m.receipt_no).trim()
+            ? String(m.receipt_no).trim()
+            : null;
+        const or_number =
+          m?.or_number != null && String(m.or_number).trim()
+            ? String(m.or_number).trim()
+            : null;
+        if (!or_number) return null;
+        if (receipt_no) return { receipt_no, or_number };
+        const uuid =
+          m?.sale_uuid != null && String(m.sale_uuid).trim()
+            ? String(m.sale_uuid).trim()
+            : m?.saleUuid != null && String(m.saleUuid).trim()
+            ? String(m.saleUuid).trim()
+            : null;
+        if (!uuid) return null;
+        const local = byUuid.get(uuid);
+        const localReceipt =
+          local && local.receipt_no != null && String(local.receipt_no).trim()
+            ? String(local.receipt_no).trim()
+            : null;
+        return localReceipt ? { receipt_no: localReceipt, or_number } : null;
+      })
+      .filter(Boolean);
+    await applyLocalSaleMapping(toApply);
+  } catch (_) {
+    // Ignore reconciliation errors; sales page will keep showing the local receipt number until next successful sync.
+  }
+}
+
 // Best-effort automatic flushing:
 // - shortly after page load
 // - whenever the browser regains connectivity
@@ -233,7 +346,10 @@ if (typeof window !== "undefined") {
     }, 2000);
   });
   window.addEventListener("online", () => {
-    void flushSyncQueue();
+    void (async () => {
+      await flushSyncQueue();
+      await reconcileLocalSaleOrNumbers();
+    })();
   });
 }
 

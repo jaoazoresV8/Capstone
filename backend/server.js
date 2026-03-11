@@ -19,6 +19,7 @@ import reportRouter from "./routes/reportRoutes.js";
 import { createCentralProxy } from "./middleware/centralProxy.js";
 import pool from "./db.js";
 import { createIdempotencyMiddleware } from "./middleware/idempotency.js";
+import { authenticateToken } from "./middleware/authMiddleware.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -154,6 +155,327 @@ app.get("/api/client-sync-status", async (req, res) => {
       statusCode: null,
       error: e?.name === "AbortError" ? "timeout" : "unreachable",
     });
+  }
+});
+
+// Proxy for checking if a Client ID is available on the central server.
+// Frontend calls this on the local client backend; we forward the request
+// to the configured CENTRAL_API_URL / central_api_url.
+app.get("/api/sync/clients/check-id", async (req, res) => {
+  try {
+    const rawCentralFromQuery =
+      typeof req.query.centralUrl === "string" ? req.query.centralUrl.trim() : "";
+    const centralUrl = rawCentralFromQuery || (await getCentralBaseUrl());
+    if (!centralUrl) {
+      return res.status(400).json({
+        message:
+          "Central server is not configured. Enter a central address in App Settings or set CENTRAL_API_URL.",
+      });
+    }
+
+    // Guard against misconfiguration where CENTRAL_API_URL (or centralUrl query)
+    // points back to this same client backend (e.g. http://localhost:5000).
+    try {
+      const currentHost = req.get("host");
+      const central = new URL(centralUrl);
+      if (central.host === currentHost) {
+        return res.status(400).json({
+          message:
+            "The central server address is pointing to this client backend. Change it to the actual central server URL (for example: http://central-host:6000).",
+        });
+      }
+    } catch {
+      // If URL parsing fails, fall through and let the fetch error handler respond.
+    }
+
+    const rawClientId = req.query.clientId;
+    const clientId = typeof rawClientId === "string" ? rawClientId.trim() : "";
+    if (!clientId) {
+      return res.status(400).json({ message: "clientId query parameter is required." });
+    }
+
+    const url = `${centralUrl.replace(/\/+$/, "")}/api/sync/clients/check-id?clientId=${encodeURIComponent(
+      clientId
+    )}`;
+
+    const headers = {};
+    const auth = req.headers["authorization"];
+    if (auth) {
+      headers["authorization"] = String(auth);
+    }
+
+    const upstream = await fetch(url, { headers });
+    const text = await upstream.text().catch(() => "");
+
+    // Try to pass through JSON responses; otherwise wrap raw text.
+    let body;
+    try {
+      body = text ? JSON.parse(text) : {};
+    } catch {
+      body = text ? { message: text } : {};
+    }
+
+    res.status(upstream.status).json(body);
+  } catch (e) {
+    console.error(
+      "Error proxying /api/sync/clients/check-id to central:",
+      e?.message || e
+    );
+    res.status(502).json({
+      message:
+        "Could not contact central to verify this Client ID. Check the central address and try again.",
+    });
+  }
+});
+
+// Proxy: push local queued operations to central (used by frontend sync-queue.js).
+// POST /api/sync/push { clientId, operations: [...] }
+app.post("/api/sync/push", authenticateToken, async (req, res) => {
+  try {
+    const centralUrl = await getCentralBaseUrl();
+    if (!centralUrl) {
+      return res.status(400).json({
+        message:
+          "Central server is not configured. Enter a central address in App Settings or set CENTRAL_API_URL.",
+      });
+    }
+
+    // Guard against misconfiguration pointing back to this client backend.
+    try {
+      const currentHost = req.get("host");
+      const central = new URL(centralUrl);
+      if (central.host === currentHost) {
+        return res.status(400).json({
+          message:
+            "The central server address is pointing to this client backend. Change it to the actual central server URL (for example: http://central-host:6000).",
+        });
+      }
+    } catch {
+      // ignore URL parse errors; fetch will fail and be handled below
+    }
+
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const upstream = await fetch(`${centralUrl}/api/sync/push`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(req.headers["authorization"]
+          ? { authorization: String(req.headers["authorization"]) }
+          : {}),
+      },
+      body: JSON.stringify(body),
+    });
+
+    const text = await upstream.text().catch(() => "");
+    let parsed;
+    try {
+      parsed = text ? JSON.parse(text) : {};
+    } catch {
+      parsed = text ? { message: text } : {};
+    }
+    return res.status(upstream.status).json(parsed);
+  } catch (e) {
+    console.error("Error proxying /api/sync/push to central:", e?.message || e);
+    return res.status(502).json({
+      message:
+        "Could not contact central to push sync operations. Check the central address and try again.",
+    });
+  }
+});
+
+// Sale mapping: after sync, resolve client receipt_no -> central OR number.
+// GET /api/sync/sale-mapping?receipt_no=<comma-separated>&sale_uuid=<comma-separated optional>
+//
+// Behavior:
+// - Proxies request to central
+// - Best-effort updates local SQLite `sales.or_number` where it matches the provided receipt_no
+//   so the Sales UI shows the correct OR number reliably per client sale.
+app.get("/api/sync/sale-mapping", authenticateToken, async (req, res) => {
+  try {
+    const centralUrl = await getCentralBaseUrl();
+    if (!centralUrl) {
+      return res.status(400).json({
+        message:
+          "Central server is not configured. Enter a central address in App Settings or set CENTRAL_API_URL.",
+      });
+    }
+
+    // Guard against misconfiguration pointing back to this client backend.
+    try {
+      const currentHost = req.get("host");
+      const central = new URL(centralUrl);
+      if (central.host === currentHost) {
+        return res.status(400).json({
+          message:
+            "The central server address is pointing to this client backend. Change it to the actual central server URL (for example: http://central-host:6000).",
+        });
+      }
+    } catch {
+      // ignore URL parse errors
+    }
+
+    const receiptNoRaw =
+      typeof req.query.receipt_no === "string" ? req.query.receipt_no : "";
+    const saleUuidRaw =
+      typeof req.query.sale_uuid === "string" ? req.query.sale_uuid : "";
+
+    const qs = new URLSearchParams();
+    if (receiptNoRaw.trim()) qs.set("receipt_no", receiptNoRaw.trim());
+    if (saleUuidRaw.trim()) qs.set("sale_uuid", saleUuidRaw.trim());
+
+    const doFetch = async (params) => {
+      const upstream = await fetch(
+        `${centralUrl}/api/sync/sale-mapping?${params.toString()}`,
+        {
+          headers: {
+            ...(req.headers["authorization"]
+              ? { authorization: String(req.headers["authorization"]) }
+              : {}),
+          },
+        }
+      );
+      const body = await upstream.json().catch(() => ({}));
+      return { upstream, body };
+    };
+
+    let { upstream, body } = await doFetch(qs);
+    if (!upstream.ok) {
+      const msg =
+        body && typeof body === "object"
+          ? String(body.message || body.error || "")
+          : "";
+
+      // Some central deployments don't have sales.receipt_no; retry using sale_uuid only.
+      if (
+        upstream.status === 400 &&
+        msg.toLowerCase().includes("receipt_no") &&
+        msg.toLowerCase().includes("column") &&
+        saleUuidRaw.trim()
+      ) {
+        const retry = new URLSearchParams();
+        retry.set("sale_uuid", saleUuidRaw.trim());
+        const out = await doFetch(retry);
+        upstream = out.upstream;
+        body = out.body;
+      }
+
+      if (!upstream.ok) {
+        return res
+          .status(upstream.status)
+          .json(body && typeof body === "object" ? body : { message: "Failed." });
+      }
+    }
+
+    const mappingsRaw = Array.isArray(body?.mappings)
+      ? body.mappings
+      : Array.isArray(body)
+      ? body
+      : [];
+
+    const mappings = (mappingsRaw || [])
+      .map((m) => {
+        const receiptCandidate =
+          (m && (m.receipt_no ?? m.receiptNo ?? m.receipt_number ?? m.receiptNumber)) ??
+          null;
+        const orCandidate =
+          (m && (m.or_number ?? m.orNumber ?? m.orNo ?? m.orNO ?? m.or)) ?? null;
+        const uuidCandidate =
+          (m && (m.sale_uuid ?? m.saleUuid ?? m.uuid ?? m.saleUUID)) ?? null;
+
+        const receipt_no =
+          receiptCandidate != null && String(receiptCandidate).trim()
+            ? String(receiptCandidate).trim()
+            : null;
+        const or_number =
+          orCandidate != null && String(orCandidate).trim()
+            ? String(orCandidate).trim()
+            : null;
+        const sale_uuid =
+          uuidCandidate != null && String(uuidCandidate).trim()
+            ? String(uuidCandidate).trim()
+            : null;
+        // Central may return only sale_uuid + or_number (no receipt_no support).
+        if (or_number && (receipt_no || sale_uuid)) {
+          return { receipt_no, sale_uuid, or_number };
+        }
+        return null;
+      })
+      .filter(Boolean);
+
+    let updated = 0;
+    if (mappings.length) {
+      // Update local sales.or_number by matching the client temp receipt number.
+      // (In local mode, we stored receipt_number into or_number.)
+      for (const m of mappings) {
+        if (!m.receipt_no) continue;
+        try {
+          const [result] = await pool.query(
+            "UPDATE sales SET or_number = ? WHERE or_number = ?",
+            [m.or_number, m.receipt_no]
+          );
+          updated += Number(result?.affectedRows || result?.changes || 0) || 0;
+        } catch (e) {
+          // Keep going: mapping should still be returned even if a local DB update fails.
+        }
+      }
+    }
+
+    return res.json({
+      mappings,
+      updated,
+      requested: {
+        receipt_no: receiptNoRaw || "",
+        sale_uuid: saleUuidRaw || "",
+      },
+      receivedCount: mappingsRaw.length || 0,
+      parsedCount: mappings.length || 0,
+    });
+  } catch (e) {
+    console.error("Error in /api/sync/sale-mapping:", e?.message || e);
+    return res.status(502).json({
+      message:
+        "Could not contact central to load sale mapping. Check connectivity and try again.",
+    });
+  }
+});
+
+// Apply mapping locally when central only supports sale_uuid -> or_number.
+// POST /api/sync/apply-sale-mapping { mappings: [{ receipt_no, or_number }] }
+app.post("/api/sync/apply-sale-mapping", authenticateToken, async (req, res) => {
+  try {
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const list = Array.isArray(body.mappings) ? body.mappings : [];
+    const mappings = list
+      .map((m) => {
+        const receipt_no =
+          m && m.receipt_no != null && String(m.receipt_no).trim()
+            ? String(m.receipt_no).trim()
+            : null;
+        const or_number =
+          m && m.or_number != null && String(m.or_number).trim()
+            ? String(m.or_number).trim()
+            : null;
+        return receipt_no && or_number ? { receipt_no, or_number } : null;
+      })
+      .filter(Boolean);
+
+    if (!mappings.length) {
+      return res.status(400).json({ message: "mappings is required." });
+    }
+
+    let updated = 0;
+    for (const m of mappings) {
+      const [result] = await pool.query(
+        "UPDATE sales SET or_number = ? WHERE or_number = ?",
+        [m.or_number, m.receipt_no]
+      );
+      updated += Number(result?.affectedRows || result?.changes || 0) || 0;
+    }
+
+    return res.json({ updated });
+  } catch (e) {
+    console.error("Error in /api/sync/apply-sale-mapping:", e?.message || e);
+    return res.status(500).json({ message: "Failed to apply sale mapping." });
   }
 });
 
@@ -749,9 +1071,32 @@ function startCentralPullWorker() {
         }
         const sourceClientId =
           payload && typeof payload === "object" ? payload.clientId : null;
+        const isOwnChange = sourceClientId && sourceClientId === thisClientId;
 
-        // Skip operations that originated from this same client (we already applied them locally).
-        if (sourceClientId && sourceClientId === thisClientId) {
+        // For our own sale: still apply central's or_number so local display shows central OR when online.
+        if (isOwnChange && String(change.entity_type || "").toLowerCase() === "sale") {
+          const data = payload && payload.data && typeof payload.data === "object"
+            ? payload.data
+            : payload && typeof payload === "object"
+            ? payload
+            : null;
+          const saleId = data && (data.id ?? data.sale_id) != null ? Number(data.id ?? data.sale_id) : NaN;
+          const centralOr = data && typeof data.or_number === "string" && data.or_number.trim()
+            ? data.or_number.trim()
+            : null;
+          if (Number.isFinite(saleId) && centralOr) {
+            try {
+              await pool.query(
+                "UPDATE sales SET or_number = ? WHERE sale_id = ?",
+                [centralOr, saleId]
+              );
+            } catch (_) {}
+          }
+          continue;
+        }
+
+        // Skip other operations that originated from this client (we already applied them locally).
+        if (isOwnChange) {
           continue;
         }
 

@@ -235,19 +235,25 @@
               </div>
               
               <div class="row g-3">
-                <div class="col-md-12">
-                  <label class="form-label sale-label">Amount to pay / Amount paid (₱)</label>
+                <div class="col-md-4">
+                  <label class="form-label sale-label">Amount to pay (₱)</label>
+                  <input type="text" class="form-control form-control-lg bg-light" id="sale-amount-to-pay" readonly placeholder="0.00" aria-readonly="true" />
+                  <small class="text-muted">Sale total (read-only).</small>
+                </div>
+                <div class="col-md-4">
+                  <label class="form-label sale-label">Amount paid (₱)</label>
                   <input type="number" class="form-control form-control-lg" id="sale-amount-paid" min="0" step="0.01" value="0" placeholder="0.00" />
-                  <small class="text-muted">Pre-filled with sale total. Edit for partial or credit.</small>
+                  <small class="text-muted">Edit for partial or credit.</small>
                   <div id="sale-amount-paid-error" class="invalid-feedback"></div>
-                  <div id="sale-amount-paid-error-big" class="alert alert-danger mt-2 mb-0 d-none fs-5" role="alert" style="font-weight: 500;"></div>
+                  <div id="sale-amount-paid-error-big" class="alert alert-danger mt-2 mb-0 d-none small" role="alert"></div>
                 </div>
-                <div class="col-md-12">
-                  <label class="form-label sale-label">Amount received (₱)</label>
-                  <input type="number" class="form-control form-control-lg" id="sale-amount-received" min="0" step="0.01" value="0" placeholder="0.00" />
-                  <small class="text-muted">What the customer gave. Used to compute change.</small>
+                <div class="col-md-4">
+                  <label class="form-label sale-label">Amount received (₱) <span class="text-danger">*</span></label>
+                  <input type="number" class="form-control form-control-lg" id="sale-amount-received" min="0" step="0.01" value="0" placeholder="0.00" required />
+                  <small class="text-muted">What the customer gave. Required to proceed.</small>
+                  <div id="sale-amount-received-error" class="invalid-feedback"></div>
                 </div>
-                <div class="col-md-12 d-none" id="sale-change-wrap">
+                <div class="col-12 d-none" id="sale-change-wrap">
                   <p class="mb-0"><strong>Change:</strong> <span id="sale-change" class="text-success fw-bold">₱0.00</span></p>
                 </div>
               </div>

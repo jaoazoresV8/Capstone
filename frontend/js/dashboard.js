@@ -7,8 +7,40 @@ const API_BASE = `${API_ORIGIN}/api/auth`;
 const SETTINGS_API = `${API_ORIGIN}/api/settings`;
 const DASHBOARD_API = `${API_ORIGIN}/api/dashboard/overview`;
 const SYNC_STATUS_API = `${API_ORIGIN}/api/client-sync-status`;
+const SYNC_CLIENT_CHECK_API = `${API_ORIGIN}/api/sync/clients/check-id`;
 
 const logoutBtn = document.getElementById("logout-btn");
+
+const APP_DEEP_LINK_PROTOCOL = "dmsales";
+
+function isRunningInElectron() {
+  return navigator.userAgent.includes("Electron");
+}
+
+function initOpenInAppOrWebLink() {
+  const link = document.getElementById("open-web-or-app-link");
+  if (!link) return;
+
+  const labelSpan = link.querySelector(".open-link-label");
+
+  if (isRunningInElectron()) {
+    // In the desktop app: keep "Open web version" behavior (href already points to web URL).
+    if (labelSpan) {
+      labelSpan.textContent = "Open web version";
+    }
+    link.target = "_blank";
+    link.href = "http://localhost:5000/pages/dashboard.html";
+    return;
+  }
+
+  // In a regular browser: change to "Open in app" using custom protocol deep link.
+  if (labelSpan) {
+    labelSpan.textContent = "Open in app";
+  }
+  link.target = "_self";
+  link.rel = "noreferrer";
+  link.href = `${APP_DEEP_LINK_PROTOCOL}://dashboard`;
+}
 
 function getAuthHeaders() {
   const token = localStorage.getItem("sm_token");
@@ -332,7 +364,7 @@ function initClientIdSettingsModal() {
     }
 
     if (feedback) {
-      feedback.textContent = "Saving…";
+      feedback.textContent = "Checking Client ID…";
       feedback.className = "small mt-2 text-muted";
     }
     if (centralFeedback) {
@@ -354,6 +386,69 @@ function initClientIdSettingsModal() {
     }
 
     try {
+      // First, check if the requested Client ID is available on central.
+      // This avoids accidental duplicates across branches/devices.
+      try {
+        const params = new URLSearchParams();
+        params.set("clientId", cid);
+        if (centralParsed.url) {
+          // Allow backend to use the just-entered central URL even before it's saved.
+          params.set("centralUrl", centralParsed.url);
+        }
+
+        const checkRes = await fetch(`${SYNC_CLIENT_CHECK_API}?${params.toString()}`, {
+          headers: getAuthHeaders(),
+        });
+        const checkData = await checkRes.json().catch(() => ({}));
+
+        // If central explicitly reports the ID as taken or unavailable, block the save.
+        if (!checkRes.ok) {
+          const taken =
+            checkRes.status === 409 ||
+            checkData.available === false ||
+            checkData.status === "taken" ||
+            checkData.status === "used" ||
+            checkData.status === "exists";
+          if (feedback) {
+            feedback.textContent =
+              checkData.message ||
+              (taken
+                ? "That Client ID is already in use."
+                : "Could not verify if this Client ID is available. Try again.");
+            feedback.className = "small mt-2 text-danger";
+          }
+          return;
+        }
+
+        // For 2xx responses, only allow saving when central explicitly confirms availability.
+        const explicitlyAvailable =
+          checkData &&
+          (checkData.available === true ||
+            checkData.status === "available" ||
+            checkData.status === "ok" ||
+            checkData.result === "available");
+        if (!explicitlyAvailable) {
+          if (feedback) {
+            feedback.textContent =
+              checkData.message || "That Client ID is already in use.";
+            feedback.className = "small mt-2 text-danger";
+          }
+          return;
+        }
+      } catch {
+        if (feedback) {
+          feedback.textContent =
+            "Could not contact central to verify this Client ID. Check the address and try again.";
+          feedback.className = "small mt-2 text-danger";
+        }
+        return;
+      }
+
+      if (feedback) {
+        feedback.textContent = "Saving…";
+        feedback.className = "small mt-2 text-muted";
+      }
+
       const res = await fetch(SETTINGS_API, {
         method: "PUT",
         headers: { "Content-Type": "application/json", ...getAuthHeaders() },
@@ -596,33 +691,79 @@ async function loadDashboardOverview() {
     if (activityList) {
       const items = Array.isArray(data.recentActivity) ? data.recentActivity : [];
       if (!items.length) return;
-      activityList.innerHTML = items
-        .map((a) => {
-          let iconClass = "bi-activity";
-          let activityClass = "sale";
-          if (a.type === "payment") {
-            iconClass = "bi-cash-coin";
-            activityClass = "payment";
-          } else if (a.type === "product") {
-            iconClass = "bi-box-seam";
-            activityClass = "product";
-          }
-          const amountPart =
-            a.amount != null ? `₱${Number(a.amount).toFixed(2)}` : "";
-          const detail =
-            a.details && a.details.trim()
-              ? a.details.trim()
-              : amountPart || "";
-          return `
-          <li class="activity-item">
-            <div class="activity-icon ${activityClass}"><i class="bi ${iconClass}"></i></div>
-            <div class="activity-body">
-              <div class="activity-title">${a.title}</div>
-              <div class="activity-meta">${detail || new Date(a.created_at).toLocaleString()}</div>
+
+      const renderItem = (a, isExtra = false) => {
+        let iconClass = "bi-activity";
+        let activityClass = "sale";
+        if (a.type === "payment") {
+          iconClass = "bi-cash-coin";
+          activityClass = "payment";
+        } else if (a.type === "product") {
+          iconClass = "bi-box-seam";
+          activityClass = "product";
+        }
+        const amountPart =
+          a.amount != null ? `₱${Number(a.amount).toFixed(2)}` : "";
+        const detail =
+          a.details && a.details.trim()
+            ? a.details.trim()
+            : amountPart || "";
+        return `
+        <li class="activity-item${isExtra ? " extra-activity" : ""}">
+          <div class="activity-icon ${activityClass}"><i class="bi ${iconClass}"></i></div>
+          <div class="activity-body">
+            <div class="activity-title">${a.title}</div>
+            <div class="activity-meta">${detail || new Date(a.created_at).toLocaleString()}</div>
+          </div>
+        </li>`;
+      };
+
+      const primaryItems = items.slice(0, 5);
+      const extraItems = items.slice(5, 10);
+
+      let html = primaryItems.map((a) => renderItem(a, false)).join("");
+
+      if (extraItems.length) {
+        html += extraItems.map((a) => renderItem(a, true)).join("");
+
+        html += `
+        <li class="activity-item">
+          <div class="activity-body w-100">
+            <div class="text-center">
+              <a href="#" class="activity-view-more-link small" id="btn-toggle-activity-more">
+                <span class="label">View more</span>
+                <span class="chevron"><i class="bi bi-chevron-down"></i></span>
+              </a>
             </div>
-          </li>`;
-        })
-        .join("");
+          </div>
+        </li>`;
+      }
+
+      activityList.innerHTML = html;
+
+      if (extraItems.length) {
+        const extraEls = activityList.querySelectorAll(".activity-item.extra-activity");
+        const toggleLink = document.getElementById("btn-toggle-activity-more");
+        const labelSpan = toggleLink?.querySelector(".label");
+        if (toggleLink && labelSpan && extraEls.length) {
+          let expanded = false;
+          const updateVisibility = () => {
+            extraEls.forEach((el) => {
+              el.classList.toggle("is-visible", expanded);
+            });
+            labelSpan.textContent = expanded
+              ? "View less"
+              : `View more (${extraEls.length})`;
+            toggleLink.classList.toggle("expanded", expanded);
+          };
+          updateVisibility();
+          toggleLink.addEventListener("click", (e) => {
+            e.preventDefault();
+            expanded = !expanded;
+            updateVisibility();
+          });
+        }
+      }
     }
   } catch {
     
@@ -743,11 +884,12 @@ window.addEventListener("DOMContentLoaded", () => {
   initSyncStatusPolling();
   initNavRefreshButton();
   initClientIdSettingsModal();
-  
+  initOpenInAppOrWebLink();
+
   ensureAuthenticated().catch(() => {
     document.body.classList.remove("page-loading");
   });
-  
+
   loadDashboardOverview();
 });
 

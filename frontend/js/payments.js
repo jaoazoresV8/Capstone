@@ -425,6 +425,22 @@ document.addEventListener("click", function (e) {
       loadPayments();
       alert("Payment recorded successfully.");
 
+      // After recording a payment from Customers → Payments flow, open receipt
+      // so cashier can immediately review / print it.
+      try {
+        if (typeof window.openReceiptForSale === "function") {
+          window.openReceiptForSale(saleIdToUse);
+        } else if (typeof window.dispatchEvent === "function") {
+          window.dispatchEvent(
+            new CustomEvent("app:open-receipt", {
+              detail: { saleId: saleIdToUse },
+            })
+          );
+        }
+      } catch (_) {
+        // Non-fatal: receipt flow is best-effort.
+      }
+
       // Queue payment sync operation so central can update balances.
       try {
         const saleUuid = getSaleUuidForLocalId(saleIdToUse);

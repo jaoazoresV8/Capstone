@@ -1,5 +1,5 @@
 
-import { app as electronApp, BrowserWindow, dialog } from "electron";
+import { app as electronApp, BrowserWindow, dialog, shell } from "electron";
 import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
@@ -10,6 +10,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 electronApp.commandLine.appendSwitch("enable-print-preview");
 
 const PORT = process.env.PORT || 5000;
+const APP_PROTOCOL = "dmsales";
+const DASHBOARD_PATH = "/pages/dashboard.html";
 
 // Log file path for debugging
 const logPath = path.join(electronApp.getPath("userData"), "app.log");
@@ -53,6 +55,65 @@ function setElectronEnv() {
 }
 
 let mainWindow = null;
+let pendingDeepLinkUrl = null;
+
+function extractDeepLinkFromArgv(argv) {
+  if (!Array.isArray(argv)) return null;
+  return (
+    argv.find(
+      (arg) => typeof arg === "string" && arg.startsWith(`${APP_PROTOCOL}://`)
+    ) || null
+  );
+}
+
+function handleDeepLink(url) {
+  if (!url) return;
+  pendingDeepLinkUrl = url;
+  log(`Received deep link: ${url}`);
+  if (!mainWindow) return;
+  try {
+    const target = `http://localhost:${PORT}${DASHBOARD_PATH}`;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+    mainWindow.loadURL(target);
+  } catch (err) {
+    log(`Failed to handle deep link: ${err.message}`);
+  }
+}
+
+const gotTheLock = electronApp.requestSingleInstanceLock();
+
+if (!gotTheLock) {
+  electronApp.quit();
+  process.exit(0);
+}
+
+const initialDeepLinkUrl = extractDeepLinkFromArgv(process.argv);
+if (initialDeepLinkUrl) {
+  pendingDeepLinkUrl = initialDeepLinkUrl;
+}
+
+function registerDeepLinkProtocol() {
+  try {
+    // In development (run with `electron .`), we must tell Electron what "app" path to use.
+    if (process.defaultApp) {
+      const appRoot = __dirname;
+      if (!electronApp.isDefaultProtocolClient(APP_PROTOCOL, process.execPath, [appRoot])) {
+        electronApp.setAsDefaultProtocolClient(APP_PROTOCOL, process.execPath, [appRoot]);
+        log(`Registered protocol handler for ${APP_PROTOCOL}:// (dev, root: ${appRoot})`);
+      }
+      return;
+    }
+
+    // In packaged / production builds, the executable path is enough.
+    if (!electronApp.isDefaultProtocolClient(APP_PROTOCOL)) {
+      electronApp.setAsDefaultProtocolClient(APP_PROTOCOL);
+      log(`Registered protocol handler for ${APP_PROTOCOL}:// (packaged)`);
+    }
+  } catch (err) {
+    log(`Failed to register protocol ${APP_PROTOCOL}: ${err.message}`);
+  }
+}
 
 function createWindow() {
   try {
@@ -91,6 +152,12 @@ function createWindow() {
 
     mainWindow.loadURL(`http://localhost:${PORT}`);
 
+    // Open external links (e.g. target="_blank") in the user's default browser
+    mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+      shell.openExternal(url);
+      return { action: "deny" };
+    });
+
     mainWindow.on("closed", () => {
       log("Main window closed");
       mainWindow = null;
@@ -108,6 +175,9 @@ electronApp.whenReady().then(async () => {
   log("Electron app ready");
   
   try {
+    // Register custom protocol for deep links (e.g., dmsales://dashboard)
+    registerDeepLinkProtocol();
+
     setElectronEnv();
 
     log("Importing backend server...");
@@ -117,10 +187,13 @@ electronApp.whenReady().then(async () => {
     await startServer(PORT);
     log("Server started successfully");
 
-  
-    await new Promise(resolve => setTimeout(resolve, 500));
-    
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
     createWindow();
+
+    if (pendingDeepLinkUrl) {
+      handleDeepLink(pendingDeepLinkUrl);
+    }
   } catch (err) {
     const errorMessage = err?.message || String(err);
     const errorStack = err?.stack || "";
@@ -144,6 +217,20 @@ electronApp.on("activate", () => {
     log("App activated, creating window");
     createWindow();
   }
+});
+
+electronApp.on("second-instance", (event, argv) => {
+  const url = extractDeepLinkFromArgv(argv);
+  if (url) handleDeepLink(url);
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  }
+});
+
+electronApp.on("open-url", (event, url) => {
+  event.preventDefault();
+  handleDeepLink(url);
 });
 
 // Handle uncaught errors

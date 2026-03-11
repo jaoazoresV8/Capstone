@@ -177,8 +177,10 @@ function showStep(step) {
   if (step === 3) {
     const totalRaw = getSaleTotalRaw();
     const totalRounded = Math.round(totalRaw * 100) / 100;
+    const amountToPayEl = document.getElementById("sale-amount-to-pay");
     const amountPaidInput = document.getElementById("sale-amount-paid");
     const amountReceivedInput = document.getElementById("sale-amount-received");
+    if (amountToPayEl) amountToPayEl.value = totalRounded > 0 ? String(totalRounded) : "0.00";
     if (amountPaidInput) {
       amountPaidInput.value = totalRounded > 0 ? String(totalRounded) : "0";
     }
@@ -241,6 +243,8 @@ function resetNewSaleModal() {
   if (customerList) customerList.innerHTML = "";
   if (updateWrap) updateWrap.classList.add("d-none");
   if (updateMsg) { updateMsg.classList.add("d-none"); updateMsg.textContent = ""; }
+  const amountToPay = document.getElementById("sale-amount-to-pay");
+  if (amountToPay) amountToPay.value = "0.00";
   if (amountPaid) {
     amountPaid.value = "0";
     amountPaid.placeholder = "0.00";
@@ -759,8 +763,12 @@ document.addEventListener("click", (e) => {
         el.disabled = false;
       });
     }
+    const totalRaw = getSaleTotalRaw();
+    const totalRounded = Math.round(totalRaw * 100) / 100;
+    const amountToPayEl = document.getElementById("sale-amount-to-pay");
     const amountPaidInput = document.getElementById("sale-amount-paid");
     const amountReceivedInput = document.getElementById("sale-amount-received");
+    if (amountToPayEl) amountToPayEl.value = totalRounded > 0 ? String(totalRounded) : "0.00";
     if (paymentMethod === "credit") {
       if (amountPaidInput) {
         amountPaidInput.value = "0";
@@ -775,8 +783,6 @@ document.addEventListener("click", (e) => {
     } else {
       if (amountPaidInput) {
         amountPaidInput.readOnly = false;
-        const totalRaw = getSaleTotalRaw();
-        const totalRounded = Math.round(totalRaw * 100) / 100;
         amountPaidInput.value = totalRounded > 0 ? String(totalRounded) : "0";
         amountPaidInput.placeholder = "0";
       }
@@ -865,6 +871,9 @@ document.addEventListener("input", (e) => {
     updateSaleChange();
   }
   if (e.target.id === "sale-amount-received") {
+    e.target.classList.remove("is-invalid");
+    const errEl = document.getElementById("sale-amount-received-error");
+    if (errEl) errEl.textContent = "";
     updateSaleChange();
   }
   if (e.target.id === "sale-payment-reference") {
@@ -1024,6 +1033,11 @@ function updateSaleTotal() {
     }
   });
   totalEl.textContent = `₱${Number(total).toFixed(2)}`;
+  const amountToPayEl = document.getElementById("sale-amount-to-pay");
+  if (amountToPayEl) {
+    const rounded = Math.round(total * 100) / 100;
+    amountToPayEl.value = rounded > 0 ? String(rounded) : "0.00";
+  }
 }
 
 // ----- Submit sale -----
@@ -1037,11 +1051,13 @@ function submitSale() {
   const idInput = document.getElementById("sale-customer-id");
   const customerNameInput = document.getElementById("sale-customer-name");
   const amountPaidEl = document.getElementById("sale-amount-paid");
+  const amountReceivedEl = document.getElementById("sale-amount-received");
   const selectedPayment = document.querySelector(".sale-payment-option.selected");
 
   const customerId = idInput ? (idInput.value || null) : null;
   const customerName = customerNameInput ? customerNameInput.value.trim() : "";
   const amountPaid = amountPaidEl ? parseFloat(amountPaidEl.value) || 0 : 0;
+  const amountReceivedRaw = amountReceivedEl ? parseFloat(amountReceivedEl.value) || 0 : 0;
   const paymentMethod = selectedPayment ? (selectedPayment.dataset.payment || "cash") : "cash";
 
   if (!customerName) {
@@ -1151,6 +1167,36 @@ function submitSale() {
     return;
   }
 
+  // Amount received required to proceed (except for Credit)
+  const amountReceivedRounded = roundToWholePeso(amountReceivedRaw);
+  const amountReceivedErrorEl = document.getElementById("sale-amount-received-error");
+  if (paymentMethod !== "credit") {
+    if (amountReceivedRounded <= 0) {
+      const alertEl = document.getElementById("sales-alert");
+      if (alertEl) {
+        alertEl.textContent = "Please enter the amount received.";
+        alertEl.className = "alert alert-warning py-2 small";
+        alertEl.classList.remove("d-none");
+      }
+      if (amountReceivedEl) amountReceivedEl.classList.add("is-invalid");
+      if (amountReceivedErrorEl) amountReceivedErrorEl.textContent = "Amount received is required to proceed.";
+      return;
+    }
+    if (amountReceivedRounded < amountPaidRounded) {
+      const alertEl = document.getElementById("sales-alert");
+      if (alertEl) {
+        alertEl.textContent = "Amount received cannot be less than amount paid.";
+        alertEl.className = "alert alert-warning py-2 small";
+        alertEl.classList.remove("d-none");
+      }
+      if (amountReceivedEl) amountReceivedEl.classList.add("is-invalid");
+      if (amountReceivedErrorEl) amountReceivedErrorEl.textContent = "Must be at least the amount paid.";
+      return;
+    }
+  }
+  if (amountReceivedEl) amountReceivedEl.classList.remove("is-invalid");
+  if (amountReceivedErrorEl) amountReceivedErrorEl.textContent = "";
+
   // Round total to whole pesos (cents >= 0.5 round up)
   const totalRaw = getSaleTotalRaw();
   const totalRounded = roundToWholePeso(totalRaw);
@@ -1241,10 +1287,11 @@ function submitSale() {
   const customerContactValue = contactResultForPayload.value;
   const receiptNumber = generateLocalReceiptNumber();
   const saleUuid = generateUuidV4();
+  const changeFromReceived =
+    amountReceivedRaw > amountPaidRounded
+      ? Math.round((amountReceivedRaw - amountPaidRounded) * 100) / 100
+      : null;
 
-  // Round total amount to whole pesos for sync payload as well.
-  const totalRaw = getSaleTotalRaw();
-  const totalRounded = roundToWholePeso(totalRaw);
   const remainingBalance = Math.max(0, totalRounded - amountPaidRounded);
   let status = "unpaid";
   if (remainingBalance <= 0) status = "paid";
@@ -1265,6 +1312,8 @@ function submitSale() {
       items,
       payment_method: paymentMethod,
       amount_paid: amountPaidRounded,
+      amount_received: amountReceivedRaw || undefined,
+      change_amount: changeFromReceived != null ? changeFromReceived : undefined,
       reference_number: referenceNumber || undefined,
       // New sync-related identifiers (backend can store or ignore extras)
       sale_uuid: saleUuid,
@@ -1294,9 +1343,8 @@ function submitSale() {
       if (!saleData.customer_name && customerName) {
         saleData.customer_name = customerName;
       }
-      const amountReceivedInput = document.getElementById("sale-amount-received");
-      const amountReceived = amountReceivedInput ? parseFloat(amountReceivedInput.value) || 0 : 0;
-      const change = amountReceived > amountPaidRounded ? Math.round((amountReceived - amountPaidRounded) * 100) / 100 : null;
+      const amountReceived = amountReceivedRaw;
+      const change = changeFromReceived;
 
       // Ensure saleData carries identifiers used for sync/receipts.
       if (!saleData.sale_uuid) saleData.sale_uuid = saleUuid;
@@ -1358,7 +1406,7 @@ function submitSale() {
         // If queuing fails, we still keep the local sale; sync can be retried later.
       }
 
-      loadSales("");
+      loadSales({});
       const alertEl = document.getElementById("sales-alert");
       if (alertEl) {
         alertEl.textContent = "Sale created successfully.";
@@ -1399,8 +1447,20 @@ function showReceipt(sale, displayCustomerName, options = {}) {
   const totalAmount = Number(sale.total_amount || 0);
   const amountPaid = Number(sale.amount_paid || 0);
   const balance = Number(sale.remaining_balance || 0);
-  const amountReceived = options.amountReceived != null ? Number(options.amountReceived) : null;
-  const changeAmount = options.change != null ? Number(options.change) : (amountReceived != null && amountReceived > amountPaid ? Math.round((amountReceived - amountPaid) * 100) / 100 : null);
+  const amountReceived =
+    options.amountReceived != null
+      ? Number(options.amountReceived)
+      : sale.amount_received != null
+      ? Number(sale.amount_received)
+      : null;
+  const changeAmount =
+    options.change != null
+      ? Number(options.change)
+      : sale.change_amount != null
+      ? Number(sale.change_amount)
+      : amountReceived != null && amountReceived > amountPaid
+      ? Math.round((amountReceived - amountPaid) * 100) / 100
+      : null;
 
   let servedBy = "—";
   try {
@@ -1450,6 +1510,13 @@ function showReceipt(sale, displayCustomerName, options = {}) {
           <hr class="receipt-totals-hr" />
           <div class="receipt-totals-row receipt-totals-grand"><span>TOTAL</span><span class="receipt-currency">₱${totalAmount.toFixed(2)}</span></div>
           <hr class="receipt-totals-hr" />
+          ${
+            amountReceived != null
+              ? `<div class="receipt-totals-row"><span>Amount Received</span><span class="receipt-currency">₱${amountReceived.toFixed(
+                  2
+                )}</span></div>`
+              : ""
+          }
           <div class="receipt-totals-row"><span>Amount Paid</span><span class="receipt-currency">₱${amountPaid.toFixed(2)}</span></div>
           ${changeAmount != null ? `<div class="receipt-totals-row"><span>Change</span><span class="receipt-currency">₱${changeAmount.toFixed(2)}</span></div>` : ""}
           ${balance > 0 ? `<div class="receipt-totals-row"><span>Balance</span><span class="receipt-currency">₱${balance.toFixed(2)}</span></div>` : ""}
@@ -1473,6 +1540,49 @@ function showReceipt(sale, displayCustomerName, options = {}) {
   if (printBtn) {
     printBtn.onclick = () => printReceiptInNewWindow();
   }
+}
+
+async function openReceiptForSale(saleId) {
+  if (!saleId) return;
+  try {
+    const res = await fetch(`${SALES_API}/${encodeURIComponent(saleId)}`, {
+      headers: authHeaders(),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const alertEl = document.getElementById("sales-alert");
+      if (alertEl) {
+        alertEl.textContent = data.message || "Failed to load sale details for receipt.";
+        alertEl.className = "alert alert-danger py-2 small";
+        alertEl.classList.remove("d-none");
+      }
+      return;
+    }
+    const sale = data.sale || data;
+    if (!sale) {
+      const alertEl = document.getElementById("sales-alert");
+      if (alertEl) {
+        alertEl.textContent = "Sale details not found for this receipt.";
+        alertEl.className = "alert alert-danger py-2 small";
+        alertEl.classList.remove("d-none");
+      }
+      return;
+    }
+    const customerName = sale.customer_name || "";
+    showReceipt(sale, customerName);
+  } catch (err) {
+    const alertEl = document.getElementById("sales-alert");
+    if (alertEl) {
+      alertEl.textContent = err.message || "Failed to load sale details for receipt.";
+      alertEl.className = "alert alert-danger py-2 small";
+      alertEl.classList.remove("d-none");
+    }
+  }
+}
+
+// Expose receipt opener globally so other pages (e.g. Payments) can reuse it.
+if (typeof window !== "undefined") {
+  window.openReceiptForSale = openReceiptForSale;
 }
 
 /** Open a new window as print preview: user sees the receipt, then clicks Print to open the printer dialog. */
@@ -1572,28 +1682,58 @@ function printReceiptInNewWindow() {
 }
 
 // ----- Sales list -----
-let allSales = []; // Store all sales for filtering
+const SALES_PAGE_SIZE = 50;
+let allSales = []; // Current page (or accumulated pages) of sales
+let salesHasMore = false;
+let salesLoading = false;
 
-function loadSales(searchQuery = "") {
+function getSalesParams() {
+  const searchInput = document.getElementById("sales-search");
+  const statusSelect = document.getElementById("sales-filter-status");
+  const q = searchInput ? (searchInput.value || "").trim() : "";
+  const status = statusSelect ? (statusSelect.value || "").trim() : "";
+  return { q, status };
+}
+
+function loadSales(opts = {}) {
+  const { append = false } = opts;
+  const params =
+    opts.q !== undefined || opts.status !== undefined ? opts : getSalesParams();
+  const q = params.q || "";
+  const status = params.status || "";
+  const offset = append ? allSales.length : 0;
+
   const tbody = document.getElementById("sales-tbody");
   if (!tbody) {
     console.warn("Sales tbody not found, retrying...");
-    setTimeout(() => loadSales(searchQuery), 100);
+    setTimeout(() => loadSales(opts), 100);
     return;
   }
   
   const token = getToken();
   if (!token) {
     console.warn("No auth token found");
-    tbody.innerHTML = '<tr><td colspan="8" class="text-danger small">Authentication required. Please login.</td></tr>';
+    tbody.innerHTML =
+      '<tr><td colspan="8" class="text-danger small">Authentication required. Please login.</td></tr>';
     return;
   }
 
-  // Show loading state
-  tbody.innerHTML = '<tr><td colspan="8" class="text-muted small">Loading sales…</td></tr>';
+  if (!append) {
+    salesLoading = true;
+    tbody.innerHTML =
+      '<tr><td colspan="8" class="text-muted small">Loading sales…</td></tr>';
+    allSales = [];
+  } else {
+    salesLoading = true;
+  }
 
-  const url = searchQuery ? `${SALES_API}?q=${encodeURIComponent(searchQuery)}` : SALES_API;
-  
+  const searchParams = new URLSearchParams();
+  if (q) searchParams.set("q", q);
+  if (status) searchParams.set("status", status.toLowerCase());
+  searchParams.set("limit", String(SALES_PAGE_SIZE));
+  searchParams.set("offset", String(offset));
+  const url = `${SALES_API}?${searchParams.toString()}`;
+
   fetch(url, { headers: authHeaders() })
     .then((r) => {
       if (!r.ok) {
@@ -1602,24 +1742,45 @@ function loadSales(searchQuery = "") {
       return r.json();
     })
     .then((data) => {
+      salesLoading = false;
       const sales = data.sales || [];
-      // Normalize with local issueState used for flag color (none | open | resolved)
-      allSales = (sales || []).map((s) => ({
+      const total = data.total ?? sales.length;
+      const hasMore = data.hasMore === true;
+      salesHasMore = hasMore;
+
+      const normalized = (sales || []).map((s) => ({
         ...s,
-        issueState: s.has_open_issue ? "open" : (s.issueState || "none"),
+        issueState: s.has_open_issue ? "open" : s.issueState || "none",
       }));
-      
+
+      allSales = append ? allSales.concat(normalized) : normalized;
+
       if (allSales.length === 0) {
         tbody.innerHTML =
           '<tr><td colspan="8" class="text-muted small">No sales found.</td></tr>';
         return;
       }
       renderSales(allSales);
+
+      const loadMoreEl = document.getElementById("sales-load-more");
+      if (loadMoreEl) {
+        if (hasMore) {
+          loadMoreEl.classList.remove("d-none");
+          loadMoreEl.textContent = `Showing ${allSales.length} of ${total} — scroll for more`;
+        } else if (allSales.length > 0 && total > allSales.length) {
+          loadMoreEl.classList.remove("d-none");
+          loadMoreEl.textContent = `Showing latest ${allSales.length} of ${total} sales`;
+        } else {
+          loadMoreEl.classList.add("d-none");
+        }
+      }
     })
     .catch((err) => {
+      salesLoading = false;
       console.error("Failed to load sales:", err);
-      tbody.innerHTML =
-        `<tr><td colspan="8" class="text-danger small">Failed to load sales: ${err.message || "Unknown error"}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="8" class="text-danger small">Failed to load sales: ${
+        err.message || "Unknown error"
+      }</td></tr>`;
     });
 }
 
@@ -1690,8 +1851,9 @@ function renderSales(sales) {
         .filter(Boolean)
         .join(" ");
 
+      const saleNoDisplay = (s.or_number || s.receipt_number || s.id);
       return `<tr${rowClasses ? ` class="${rowClasses}"` : ""} ${rowAttrs}>
-          <td>${s.id}</td>
+          <td>${escapeHtml(String(saleNoDisplay))}</td>
           <td>${transactionTypeBadge}${escapeHtml(s.customer_name || "—")}</td>
           <td>₱${Number(s.total_amount || 0).toFixed(2)}</td>
           <td>₱${Number(s.amount_paid || 0).toFixed(2)}</td>
@@ -1701,6 +1863,9 @@ function renderSales(sales) {
           <td class="text-end">
             <div class="d-inline-flex align-items-center">
               ${flagButton}
+              <button type="button" class="btn btn-outline-secondary btn-sm me-1" data-action="reprint-receipt" data-sale-id="${s.id}" title="View / Reprint receipt">
+                <i class="bi bi-receipt"></i>
+              </button>
               ${dropdown}
             </div>
           </td>
@@ -1720,42 +1885,9 @@ function renderSales(sales) {
   }
 }
 
-function filterSales(query, statusFilter) {
-  let filtered = allSales;
-  const searchTerm = (query || "").trim().toLowerCase();
-  const status = (statusFilter || "").trim().toLowerCase();
-
-  if (searchTerm) {
-    filtered = filtered.filter((s) => {
-      const customerName = (s.customer_name || "").toLowerCase();
-      const saleId = String(s.id || "");
-      const sStatus = (s.status || "").toLowerCase();
-      return customerName.includes(searchTerm) || saleId.includes(searchTerm) || sStatus.includes(searchTerm);
-    });
-  }
-  if (status) {
-    filtered = filtered.filter((s) => (s.status || "").toLowerCase() === status);
-  }
-
-  // Keep flagged (open issue) sales at the top even when filtering
-  const ordered = filtered.slice().sort((a, b) => {
-    const aIssue = a.issueState || (a.has_open_issue ? "open" : "none");
-    const bIssue = b.issueState || (b.has_open_issue ? "open" : "none");
-    const aFlag = aIssue === "open";
-    const bFlag = bIssue === "open";
-    if (aFlag === bFlag) return 0;
-    return aFlag ? -1 : 1;
-  });
-
-  renderSales(ordered);
-}
-
 function applySalesFilter() {
-  const searchInput = document.getElementById("sales-search");
-  const statusSelect = document.getElementById("sales-filter-status");
-  const query = searchInput ? searchInput.value.trim() : "";
-  const status = statusSelect ? (statusSelect.value || "").trim() : "";
-  filterSales(query, status);
+  const { q, status } = getSalesParams();
+  loadSales({ q, status, append: false });
 }
 
 // Sales search/filter functionality
@@ -1763,7 +1895,6 @@ let salesSearchTimeout = null;
 
 document.addEventListener("input", (e) => {
   if (e.target.id === "sales-search") {
-    const query = e.target.value.trim();
     if (salesSearchTimeout) clearTimeout(salesSearchTimeout);
     salesSearchTimeout = setTimeout(applySalesFilter, 300);
   }
@@ -1793,8 +1924,9 @@ function openFlagIssueModal(saleId) {
   const noteInput = document.getElementById("flag-issue-note");
   const errorEl = document.getElementById("flag-issue-error");
   if (labelEl) {
+    const saleNo = sale ? (sale.or_number || sale.receipt_number || sale.id) : saleId;
     const label = sale
-      ? `#${sale.id} – ${sale.customer_name || "Customer"}`
+      ? `${saleNo} – ${sale.customer_name || "Customer"}`
       : `#${saleId}`;
     labelEl.textContent = label;
   }
@@ -1875,6 +2007,15 @@ async function submitFlagIssue() {
 }
 
 document.addEventListener("click", (e) => {
+  const reprintBtn = e.target.closest(
+    "button[data-action='reprint-receipt'][data-sale-id]"
+  );
+  if (reprintBtn) {
+    const saleId = reprintBtn.getAttribute("data-sale-id");
+    if (saleId) {
+      openReceiptForSale(saleId);
+    }
+  }
   const flagBtn = e.target.closest("button[data-action='flag-sale'][data-sale-id]");
   if (flagBtn) {
     const saleId = flagBtn.getAttribute("data-sale-id");
@@ -2148,7 +2289,7 @@ document.addEventListener("click", (e) => {
 function checkAndLoadIfSalesPage() {
   const tbody = document.getElementById("sales-tbody");
   if (tbody && document.body?.dataset.page === "sales") {
-    loadSales();
+    loadSales({});
   }
 }
 
@@ -2166,7 +2307,7 @@ window.addEventListener("DOMContentLoaded", () => {
 window.addEventListener("pjax:complete", (e) => {
   if (e.detail && e.detail.page === "sales") {
     setTimeout(() => {
-      loadSales("");
+      loadSales({});
     }, 100);
   }
 });
@@ -2184,7 +2325,7 @@ function setupSalesPageObserver() {
       if (mutation.type === "attributes" && mutation.attributeName === "data-page") {
         if (document.body.dataset.page === "sales") {
           setTimeout(() => {
-            loadSales("");
+            loadSales({});
           }, 100);
         }
         break;
@@ -2222,7 +2363,7 @@ function setupSalesMainObserver() {
         // If showing "Loading" or empty, reload
         if (!firstRow || firstRow.textContent.includes("Loading")) {
           setTimeout(() => {
-            loadSales("");
+            loadSales({});
           }, 100);
         }
       }
@@ -2264,3 +2405,13 @@ if (document.readyState === "loading") {
 } else {
   maybeOpenIssueFromQuery();
 }
+
+// Confirm before closing the receipt modal so cashiers don't accidentally lose it
+document.addEventListener("hide.bs.modal", (event) => {
+  const target = event.target;
+  if (!target || target.id !== "receiptModal") return;
+  const ok = window.confirm("Are you sure you want to close this receipt?");
+  if (!ok) {
+    event.preventDefault();
+  }
+});

@@ -62,6 +62,18 @@ function computeProductCategories(list) {
   productCategories = Array.from(set).sort((a, b) => a.localeCompare(b));
 }
 
+function renderProductCategoryFilterOptions() {
+  const select = document.getElementById("product-filter-category");
+  if (!select) return;
+  const current = select.value;
+  select.innerHTML =
+    '<option value="">All categories</option>' +
+    productCategories.map((c) => `<option value="${c}">${c}</option>`).join("");
+  if (current && productCategories.includes(current)) {
+    select.value = current;
+  }
+}
+
 function renderProductCategoryOptions() {
   const select = document.getElementById("product-category");
   if (!select) return;
@@ -93,15 +105,17 @@ function setProductCategoryValue(category) {
 
 function getProductsParams() {
   const q = document.getElementById("product-search-filter")?.value?.trim() ?? "";
+  const category = document.getElementById("product-filter-category")?.value?.trim() ?? "";
   const filter = document.getElementById("product-filter-today")?.value ?? "";
   const sort = document.getElementById("product-sort")?.value ?? "name_asc";
-  return { q, filter, sort };
+  return { q, category, filter, sort };
 }
 
 function loadProducts(opts = {}) {
   const { append = false } = opts;
   const params = opts.q !== undefined ? opts : getProductsParams();
   const q = params.q ?? "";
+  const category = params.category ?? "";
   const filter = params.filter ?? "";
   const sort = params.sort ?? "name_asc";
   const offset = append ? allProducts.length : 0;
@@ -135,6 +149,7 @@ function loadProducts(opts = {}) {
 
   const searchParams = new URLSearchParams();
   if (q) searchParams.set("q", q);
+  if (category) searchParams.set("category", category);
   if (filter === "today") searchParams.set("filter", "today");
   searchParams.set("sort", sort);
   searchParams.set("limit", String(PRODUCTS_PAGE_SIZE));
@@ -167,6 +182,7 @@ function loadProducts(opts = {}) {
 
       computeProductCategories(allProducts);
       renderProductCategoryOptions();
+      renderProductCategoryFilterOptions();
 
       const loadMoreEl = document.getElementById("products-load-more");
       if (loadMoreEl) {
@@ -197,7 +213,17 @@ function loadProducts(opts = {}) {
 function appendProductRows(products) {
   const tbody = getProductsTbody();
   if (!tbody || !products.length) return;
-  const fragment = products
+
+  const selectedCategory =
+    document.getElementById("product-filter-category")?.value?.trim() ?? "";
+  const visibleProducts = selectedCategory
+    ? products.filter(
+        (p) => (p.category || "").trim() === selectedCategory
+      )
+    : products;
+  if (!visibleProducts.length) return;
+
+  const fragment = visibleProducts
     .map((p) => {
       const hasSupplier = p.supplier_id != null;
       const supplierCell = hasSupplier
@@ -226,13 +252,31 @@ function appendProductRows(products) {
     })
     .join("");
   tbody.insertAdjacentHTML("beforeend", fragment);
+
+  // Ask the view-toggle helper to refresh card/kanban views for products.
+  try {
+    const section = document.querySelector('.data-view-section[data-view-id="products"]');
+    if (section && typeof CustomEvent === "function") {
+      section.dispatchEvent(new CustomEvent("data-view:refresh"));
+    }
+  } catch (_) {
+    // Ignore; table view still renders correctly.
+  }
 }
 
 function renderProducts(products) {
   const tbody = getProductsTbody();
   if (!tbody) return;
-  
-  tbody.innerHTML = products
+
+  const selectedCategory =
+    document.getElementById("product-filter-category")?.value?.trim() ?? "";
+  const visibleProducts = selectedCategory
+    ? products.filter(
+        (p) => (p.category || "").trim() === selectedCategory
+      )
+    : products;
+
+  tbody.innerHTML = visibleProducts
     .map(
       (p) => {
         const supplierName = p.supplier_name || "—";
@@ -263,6 +307,16 @@ function renderProducts(products) {
       }
     )
     .join("");
+
+  // Ask the view-toggle helper to refresh card/kanban views for products.
+  try {
+    const section = document.querySelector('.data-view-section[data-view-id="products"]');
+    if (section && typeof CustomEvent === "function") {
+      section.dispatchEvent(new CustomEvent("data-view:refresh"));
+    }
+  } catch (_) {
+    // Ignore; table view still renders correctly.
+  }
 }
 
 function applyProductsFilter() {
@@ -655,7 +709,11 @@ document.addEventListener("change", (e) => {
   if (e.target.id === "product-supplier-price") {
     computeSellingPrice();
   }
-  if (e.target.id === "product-filter-today" || e.target.id === "product-sort") {
+  if (
+    e.target.id === "product-filter-today" ||
+    e.target.id === "product-sort" ||
+    e.target.id === "product-filter-category"
+  ) {
     applyProductsFilter();
   }
 });

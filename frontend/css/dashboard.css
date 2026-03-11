@@ -46,7 +46,9 @@ body:not(.page-loading) {
 
 .app-main {
   min-height: calc(100vh - var(--dm-nav-height));
-  padding-top: 1.5rem;
+  /* Reserve space from the top so content never sits under the fixed navbar.
+     Uses a safe offset that stays consistent on load and refresh (nav can wrap to two lines). */
+  padding-top: calc(var(--dm-nav-height) + 3rem);
   padding-bottom: 2rem;
 }
 
@@ -85,6 +87,87 @@ body[data-page="overview"] .app-main {
   box-shadow: none;
 }
 
+/* Open in app / web switcher (dashboard hero CTA) */
+.dm-open-link-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding-inline: 0.9rem;
+  padding-block: 0.45rem;
+  border-radius: 999px;
+  border-color: rgba(37, 99, 235, 0.4);
+  color: var(--dm-primary);
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.12);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  overflow: hidden;
+}
+
+.dm-open-link-btn .dm-open-link-icon-wrap {
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(circle at 30% 0%, #93c5fd, #2563eb);
+  color: #fff;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.3), 0 6px 12px rgba(37, 99, 235, 0.55);
+}
+
+.dm-open-link-btn .dm-open-link-icon-wrap i {
+  font-size: 0.95rem;
+}
+
+.dm-open-link-btn .dm-open-link-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.dm-open-link-btn::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(120deg, rgba(59, 130, 246, 0.06), rgba(59, 130, 246, 0.22));
+  opacity: 0;
+  transition: opacity 0.2s ease-out;
+}
+
+.dm-open-link-btn::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at 0% 0%, rgba(255, 255, 255, 0.3), transparent 55%);
+  opacity: 0;
+  transition: opacity 0.2s ease-out, transform 0.2s ease-out;
+  transform: translate3d(-12%, -20%, 0);
+}
+
+.dm-open-link-btn:hover {
+  border-color: rgba(37, 99, 235, 0.8);
+  color: var(--dm-primary);
+  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.18);
+  transform: translateY(-1px);
+}
+
+.dm-open-link-btn:hover::before {
+  opacity: 1;
+}
+
+.dm-open-link-btn:hover::after {
+  opacity: 1;
+  transform: translate3d(0, 0, 0);
+}
+
+.dm-open-link-btn:active {
+  transform: translateY(0);
+  box-shadow: 0 4px 10px rgba(15, 23, 42, 0.14);
+}
+
 /* Column borders for all data tables (separate columns) */
 .app-main table.table th,
 .app-main table.table td {
@@ -97,8 +180,10 @@ body[data-page="overview"] .app-main {
 
 /* ===== Navbar ===== */
 .app-navbar {
-  position: sticky;
+  position: fixed;
   top: 0;
+  left: 0;
+  right: 0;
   z-index: 1030;
   background: linear-gradient(135deg, var(--dm-primary) 0%, var(--dm-primary-light) 100%) !important;
   box-shadow: var(--dm-shadow-md);
@@ -229,6 +314,22 @@ body[data-page="overview"] .app-main {
   color: var(--dm-danger);
 }
 
+/* Constrain nav user name so long names don't overflow */
+.app-navbar .nav-user-dropdown #nav-user-name {
+  max-width: 10rem;
+  display: inline-block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+
+@media (max-width: 992px) {
+  .app-navbar .nav-user-dropdown #nav-user-name {
+    max-width: 8rem;
+  }
+}
+
 /* Sync status indicator (central / local) – visible on all pages via nav; responsive in Electron */
 .nav-sync-indicator {
   color: rgba(255, 255, 255, 0.9);
@@ -237,14 +338,22 @@ body[data-page="overview"] .app-main {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
-  padding: 0.3rem 0.6rem;
-  max-width: min(100%, 240px);
+  padding: 0.25rem 0.55rem;
+  max-width: min(100%, 210px);
   min-width: 0;
   border-radius: 999px;
   background: rgba(15, 23, 42, 0.4);
   border: 1px solid rgba(255, 255, 255, 0.12);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
   transition: background 0.25s ease, box-shadow 0.25s ease, transform 0.2s ease;
+}
+
+@media (max-width: 576px) {
+  .nav-sync-indicator {
+    width: 180px;
+    max-width: 210px;
+    box-sizing: border-box;
+  }
 }
 .nav-sync-indicator #nav-sync-text {
   min-width: 0;
@@ -396,11 +505,17 @@ body.auth-pending .app-main {
   visibility: hidden;
 }
 
-/* Admin-only nav link: hidden by default, shown by JS only for admins */
+/* Admin-only nav link: keep for items like Users / Sale issues / Password requests,
+   but allow App settings to be visible to all roles via a separate attribute. */
 [data-admin-only="true"] {
   display: none !important;
 }
 body.admin-visible [data-admin-only="true"] {
+  display: block !important;
+}
+
+/* App settings: visible for all authenticated users, regardless of role */
+[data-app-settings="true"] {
   display: block !important;
 }
 
@@ -589,6 +704,54 @@ body.admin-visible [data-admin-only="true"] {
   font-size: 2rem;
   margin-bottom: 0.5rem;
   opacity: 0.5;
+}
+
+/* Recent activity "View more" link + animation */
+.activity-view-more-link {
+  color: var(--dm-muted);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.activity-view-more-link:hover {
+  color: var(--dm-text);
+  text-decoration: underline;
+}
+
+.activity-view-more-link .chevron {
+  display: inline-block;
+  margin-left: 0.25rem;
+  font-size: 0.85em;
+  transition: transform 0.2s ease;
+}
+
+.activity-view-more-link.expanded .chevron {
+  transform: rotate(180deg);
+}
+
+.activity-list .activity-item.extra-activity {
+  max-height: 0;
+  opacity: 0;
+  margin-top: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  border-top-width: 0;
+  overflow: hidden;
+  transition:
+    max-height 0.25s ease,
+    opacity 0.25s ease,
+    margin-top 0.25s ease,
+    padding 0.25s ease,
+    border-top-width 0.25s ease;
+}
+
+.activity-list .activity-item.extra-activity.is-visible {
+  max-height: 80px;
+  opacity: 1;
+  margin-top: 0.25rem;
+  padding-top: 0.75rem;
+  padding-bottom: 0.75rem;
+  border-top-width: 1px;
 }
 
 /* New Sale wizard (3 steps) – labels only, no numbers */
@@ -1047,7 +1210,9 @@ tr.customer-with-balance:hover {
 
 /* Customers: expandable details panel */
 .customer-details-expanded {
-  max-width: 640px;
+  max-width: 720px;
+  margin: 0 auto;
+  color: var(--dm-text, #0f172a);
 }
 .customer-details-expanded .detail-section {
   margin-bottom: 1rem;

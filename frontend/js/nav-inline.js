@@ -18,7 +18,7 @@
   var activePage = (document.body && document.body.dataset.page) ? document.body.dataset.page : "overview";
   var active = function (page) { return page === activePage ? " active" : ""; };
   var html =
-    '<nav class="navbar navbar-expand-lg navbar-dark app-navbar sticky-top">' +
+    '<nav class="navbar navbar-expand-lg navbar-dark app-navbar fixed-top">' +
     '  <div class="container-fluid">' +
     '    <a class="navbar-brand" href="./dashboard.html">' +
     '      <i class="bi bi-shop"></i> D&amp;M Sales' +
@@ -52,7 +52,7 @@
     '          <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="navUserDropdown">' +
     '            <li data-admin-only="true"><button type="button" id="btn-open-sale-issues" class="dropdown-item"><i class="bi bi-flag-fill me-2"></i> Sale issues <span id="nav-sale-issues-count" class="badge bg-danger ms-2 d-none">0</span></button></li>' +
     '            <li data-admin-only="true"><button type="button" id="btn-open-password-requests" class="dropdown-item"><i class="bi bi-exclamation-circle me-2"></i> Password requests <span id="nav-admin-reset-count" class="badge bg-danger ms-2 d-none">0</span></button></li>' +
-    '            <li data-admin-only="true"><button type="button" id="btn-open-app-settings" class="dropdown-item"><i class="bi bi-sliders me-2"></i> App settings</button></li>' +
+    '            <li data-app-settings="true"><button type="button" id="btn-open-app-settings" class="dropdown-item"><i class="bi bi-sliders me-2"></i> App settings</button></li>' +
     '            <li data-admin-only="true"><hr class="dropdown-divider"></li>' +
     '            <li><button type="button" id="logout-btn" class="dropdown-item danger"><i class="bi bi-box-arrow-right me-2"></i> Logout</button></li>' +
     '          </ul>' +

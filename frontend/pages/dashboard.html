@@ -14,9 +14,22 @@
     <script src="../js/nav-inline.js"></script>
 
     <main class="app-main container">
-      <div class="dashboard-welcome">
-        <h1 id="welcome-title">Welcome back</h1>
-        <p id="welcome-subtitle">Quick view of your sales, balances, and inventory activity.</p>
+      <div class="d-flex flex-wrap justify-content-between align-items-center dashboard-welcome">
+        <div>
+          <h1 id="welcome-title">Welcome back</h1>
+          <p id="welcome-subtitle">Quick view of your sales, balances, and inventory activity.</p>
+        </div>
+        <div class="mt-2 mt-md-0 d-none d-lg-block">
+          <a
+            id="open-web-or-app-link"
+            href="http://localhost:5000/pages/dashboard.html"
+            target="_blank"
+            rel="noreferrer"
+            class="btn btn-outline-primary btn-sm dm-open-link-btn"
+          >
+            <span class="open-link-label dm-open-link-label">Open web version</span>
+          </a>
+        </div>
       </div>
 
       <div class="row g-3 mb-4" data-admin-only="true">

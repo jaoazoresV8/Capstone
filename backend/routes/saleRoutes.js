@@ -91,8 +91,8 @@ router.get("/issues", requireAdmin, async (req, res) => {
   }
 });
 
-// GET /api/sales - list sales with customer name (payment_method from payments.reference_number or 'cash')
-// Also includes has_open_issue flag when sale_issues table is present.
+// GET /api/sales - list sales with filters + pagination
+// Accepts: q (search), status, limit, offset. Returns: { sales, total, hasMore }.
 router.get("/", async (req, res) => {
   try {
     const columns = getTableColumns("sales");
@@ -100,33 +100,68 @@ router.get("/", async (req, res) => {
     const hasCustomerName = columns.includes("customer_name");
     const hasOrNumber = columns.includes("or_number");
     const hasIssues = hasSaleIssuesTable();
-    
-    let query;
-    if (hasCustomerName) {
-      query = `SELECT s.sale_id AS id, s.customer_id, COALESCE(c.name, s.customer_name) AS customer_name,
-                      s.total_amount, s.amount_paid, s.remaining_balance, s.status,
-                      s.sale_date, ${hasTransactionType ? "s.transaction_type" : "NULL AS transaction_type"}, 
-                      ${hasOrNumber ? "s.or_number" : "NULL AS or_number"},
-                      s.customer_name AS walk_in_customer_name
-               FROM sales s
-               LEFT JOIN customers c ON c.customer_id = s.customer_id
-               ORDER BY s.sale_date DESC`;
-    } else {
-      query = `SELECT s.sale_id AS id, s.customer_id, c.name AS customer_name,
-                      s.total_amount, s.amount_paid, s.remaining_balance, s.status,
-                      s.sale_date, NULL AS transaction_type, NULL AS walk_in_customer_name,
-                      ${hasOrNumber ? "s.or_number" : "NULL AS or_number"}
-               FROM sales s
-               LEFT JOIN customers c ON c.customer_id = s.customer_id
-               ORDER BY s.sale_date DESC`;
+
+    const q = String(req.query.q || "").trim();
+    const status = String(req.query.status || "").trim().toLowerCase();
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 100);
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+
+    const params = [];
+    const whereParts = [];
+
+    if (q) {
+      whereParts.push(
+        "(CAST(s.sale_id AS TEXT) LIKE ? OR " +
+          "LOWER(COALESCE(c.name, s.customer_name)) LIKE ? OR " +
+          "LOWER(s.status) LIKE ?)"
+      );
+      params.push(`%${q}%`, `%${q.toLowerCase()}%`, `%${q.toLowerCase()}%`);
     }
-    
-    const [rows] = await pool.query(query);
-    if (rows.length === 0) return res.json({ sales: [] });
+
+    if (status) {
+      whereParts.push("LOWER(s.status) = ?");
+      params.push(status);
+    }
+
+    const whereSql = whereParts.length ? "WHERE " + whereParts.join(" AND ") : "";
+
+    const baseSelect = hasCustomerName
+      ? `SELECT s.sale_id AS id, s.customer_id, COALESCE(c.name, s.customer_name) AS customer_name,
+                s.total_amount, s.amount_paid, s.remaining_balance, s.status,
+                s.sale_date, ${hasTransactionType ? "s.transaction_type" : "NULL AS transaction_type"},
+                ${hasOrNumber ? "s.or_number" : "NULL AS or_number"},
+                s.customer_name AS walk_in_customer_name
+         FROM sales s
+         LEFT JOIN customers c ON c.customer_id = s.customer_id`
+      : `SELECT s.sale_id AS id, s.customer_id, c.name AS customer_name,
+                s.total_amount, s.amount_paid, s.remaining_balance, s.status,
+                s.sale_date, NULL AS transaction_type, NULL AS walk_in_customer_name,
+                ${hasOrNumber ? "s.or_number" : "NULL AS or_number"}
+         FROM sales s
+         LEFT JOIN customers c ON c.customer_id = s.customer_id`;
+
+    // Count for pagination
+    const countSql = `SELECT COUNT(*) AS total FROM (${baseSelect} ${whereSql}) AS sub`;
+    const [countRows] = await pool.query(countSql, params);
+    const total = countRows[0]?.total ?? 0;
+
+    if (!total) {
+      return res.json({ sales: [], total: 0, hasMore: false });
+    }
+
+    // Paged query
+    const query = `${baseSelect} ${whereSql} ORDER BY s.sale_date DESC, s.sale_id DESC LIMIT ? OFFSET ?`;
+    const [rows] = await pool.query(query, [...params, limit, offset]);
+
+    if (!rows.length) {
+      return res.json({ sales: [], total, hasMore: false });
+    }
+
+    const saleIds = rows.map((r) => r.id);
 
     const [payments] = await pool.query(
       "SELECT sale_id, reference_number, payment_method FROM payments WHERE sale_id IN (?)",
-      [rows.map((r) => r.id)]
+      [saleIds]
     );
     const payBySale = {};
     const refBySale = {};
@@ -146,7 +181,10 @@ router.get("/", async (req, res) => {
         method = refRaw;
       }
       payBySale[p.sale_id] = method;
-      refBySale[p.sale_id] = p.reference_number != null && String(p.reference_number).trim() ? String(p.reference_number).trim() : null;
+      refBySale[p.sale_id] =
+        p.reference_number != null && String(p.reference_number).trim()
+          ? String(p.reference_number).trim()
+          : null;
     }
 
     // Open issue indicator per sale (if table exists)
@@ -157,7 +195,7 @@ router.get("/", async (req, res) => {
          FROM sale_issues
          WHERE status = 'open' AND sale_id IN (?)
          GROUP BY sale_id`,
-        [rows.map((r) => r.id)]
+        [saleIds]
       );
       openIssuesBySale = Object.fromEntries(
         (issueRows || []).map((row) => [row.sale_id, Number(row.open_count) || 0])
@@ -171,7 +209,12 @@ router.get("/", async (req, res) => {
       reference_number: refBySale[r.id] ?? null,
       has_open_issue: hasIssues ? Boolean(openIssuesBySale[r.id]) : false,
     }));
-    return res.json({ sales: salesWithMethod });
+
+    return res.json({
+      sales: salesWithMethod,
+      total,
+      hasMore: offset + salesWithMethod.length < total,
+    });
   } catch (err) {
     console.error("GET /api/sales:", err);
     return res.status(500).json({ message: "Failed to load sales." });
