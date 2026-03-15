@@ -75,13 +75,13 @@ async function rebuildAggregatedReports(db) {
 
   const dailyMap = new Map();
   for (const row of saleRows || []) {
-    const key = row.d ? String(row.d).slice(0, 10) : "";
+    const key = row.d ? row.d.toISOString().slice(0, 10) : "";
     if (!key) continue;
     if (!dailyMap.has(key)) dailyMap.set(key, { date: key, total_sales: 0, total_payments: 0 });
     dailyMap.get(key).total_sales += Number(row.total_sales || 0);
   }
   for (const row of paymentRows || []) {
-    const key = row.d ? String(row.d).slice(0, 10) : "";
+    const key = row.d ? row.d.toISOString().slice(0, 10) : "";
     if (!key) continue;
     if (!dailyMap.has(key)) dailyMap.set(key, { date: key, total_sales: 0, total_payments: 0 });
     dailyMap.get(key).total_payments += Number(row.total_payments || 0);
@@ -403,4 +403,3 @@ router.get("/all", async (req, res) => {
 });
 
 export default router;
-

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Payments - D&amp;M Sales</title>
     <link rel="stylesheet" href="/css/bootstrap.min.css" />
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" crossorigin="anonymous" />
+    <link rel="stylesheet" href="/vendor/bootstrap-icons/font/bootstrap-icons.min.css" />
     <link rel="stylesheet" href="../css/dashboard.css" />
     <style>
       .payments-table th,
@@ -144,8 +144,8 @@
                   <div class="card-body">
                     <h6 class="card-title mb-2">Manual verification</h6>
                     <label class="form-label small mb-1">Reference no. <span class="text-danger">*</span></label>
-                    <input type="text" class="form-control" id="record-payment-reference" placeholder="Enter reference number (e.g. GCash)" autocomplete="off" />
-                    <small class="text-muted">Required for GCash/PayMaya. Saved with this payment and shown on the Payments page.</small>
+                    <input type="text" class="form-control" id="record-payment-reference" placeholder="GCash: digits only. Maya: letters and numbers. Max 14 characters." maxlength="14" autocomplete="off" />
+                    <small class="text-muted">Required for GCash/PayMaya. GCash: numeric only. Maya: letters and numbers. Max 14 characters.</small>
                     <div id="record-payment-reference-error" class="invalid-feedback">Please enter the reference number.</div>
                   </div>
                 </div>
@@ -177,9 +177,19 @@
       <div class="modal fade" id="paymentDetailsModal" tabindex="-1" aria-labelledby="paymentDetailsModalLabel" aria-hidden="true">
         <div class="modal-dialog modal-lg modal-dialog-scrollable">
           <div class="modal-content">
-            <div class="modal-header">
-              <h5 class="modal-title" id="paymentDetailsModalLabel">Payment details</h5>
-              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            <div class="modal-header d-flex justify-content-between align-items-center">
+              <h5 class="modal-title mb-0" id="paymentDetailsModalLabel">Payment details</h5>
+              <div class="d-flex align-items-center gap-2">
+                <button
+                  type="button"
+                  class="btn btn-link btn-sm text-decoration-none"
+                  id="payment-details-preview-receipt"
+                >
+                  <i class="bi bi-receipt me-1"></i>
+                  <span>Preview latest receipt</span>
+                </button>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+              </div>
             </div>
             <div class="modal-body">
               <div id="payment-details-body" class="small text-muted">

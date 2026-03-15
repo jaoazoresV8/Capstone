@@ -9,9 +9,32 @@ const DASHBOARD_API = `${API_ORIGIN}/api/dashboard/overview`;
 const SYNC_STATUS_API = `${API_ORIGIN}/api/client-sync-status`;
 const SYNC_CLIENT_CHECK_API = `${API_ORIGIN}/api/sync/clients/check-id`;
 
+function escapeHtml(s) {
+  if (s == null) return "";
+  const div = document.createElement("div");
+  div.textContent = s;
+  return div.innerHTML;
+}
+
 const logoutBtn = document.getElementById("logout-btn");
 
 const APP_DEEP_LINK_PROTOCOL = "dmsales";
+
+// When opened in system browser with token in hash (e.g. from "Open web version" in Electron), restore session and clean URL
+(function restoreSessionFromHash() {
+  const hash = window.location.hash.slice(1);
+  if (!hash) return;
+  const params = new URLSearchParams(hash);
+  const token = params.get("sm_token");
+  const user = params.get("sm_user");
+  if (token) {
+    try {
+      localStorage.setItem("sm_token", token);
+      if (user) localStorage.setItem("sm_user", user);
+    } catch (_) {}
+    window.history.replaceState(null, "", window.location.pathname + window.location.search);
+  }
+})();
 
 function isRunningInElectron() {
   return navigator.userAgent.includes("Electron");
@@ -24,12 +47,25 @@ function initOpenInAppOrWebLink() {
   const labelSpan = link.querySelector(".open-link-label");
 
   if (isRunningInElectron()) {
-    // In the desktop app: keep "Open web version" behavior (href already points to web URL).
+    // In the desktop app: open in system browser with current session so user stays logged in.
     if (labelSpan) {
       labelSpan.textContent = "Open web version";
     }
     link.target = "_blank";
-    link.href = "http://localhost:5000/pages/dashboard.html";
+    const baseUrl = `${window.location.origin}/pages/dashboard.html`;
+    link.href = baseUrl;
+    link.addEventListener("click", (e) => {
+      if (window.electronAPI?.openExternal) {
+        e.preventDefault();
+        const token = localStorage.getItem("sm_token");
+        const user = localStorage.getItem("sm_user");
+        const url =
+          token
+            ? `${baseUrl}#sm_token=${encodeURIComponent(token)}${user ? "&sm_user=" + encodeURIComponent(user) : ""}`
+            : baseUrl;
+        window.electronAPI.openExternal(url);
+      }
+    });
     return;
   }
 
@@ -45,6 +81,19 @@ function initOpenInAppOrWebLink() {
 function getAuthHeaders() {
   const token = localStorage.getItem("sm_token");
   return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+async function fetchWithTimeout(resource, options = {}, timeoutMs = 5000) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(resource, { ...options, signal: controller.signal });
+    clearTimeout(id);
+    return res;
+  } catch (err) {
+    clearTimeout(id);
+    throw err;
+  }
 }
 
 async function loadMarkupSetting() {
@@ -69,9 +118,9 @@ function initMarkupSetting() {
     const feedback = document.getElementById("markup-feedback");
     if (!input) return;
     const value = parseFloat(input.value);
-    if (isNaN(value) || value < 0 || value > 999) {
+    if (isNaN(value) || value < 0 || value >= 100) {
       if (feedback) {
-        feedback.textContent = "Enter a number between 0 and 999.";
+        feedback.textContent = "Enter a margin between 0 and 99.99 (e.g. 14 for 14% profit margin).";
         feedback.className = "small mt-2 text-danger";
       }
       return;
@@ -92,7 +141,7 @@ function initMarkupSetting() {
         return;
       }
       if (feedback) {
-        feedback.textContent = "Markup percentage updated.";
+        feedback.textContent = "Margin percentage updated.";
         feedback.className = "small mt-2 text-success";
       }
     } catch {
@@ -108,6 +157,7 @@ async function loadAppSettings() {
   const input = document.getElementById("settings-client-id");
   const feedback = document.getElementById("client-id-feedback");
   const centralFeedback = document.getElementById("central-url-feedback");
+  const appAlert = document.getElementById("app-settings-alert");
   if (!input) return;
   if (feedback) {
     feedback.textContent = "";
@@ -116,6 +166,10 @@ async function loadAppSettings() {
   if (centralFeedback) {
     centralFeedback.textContent = "";
     centralFeedback.className = "small mt-1 text-muted";
+  }
+   if (appAlert) {
+    appAlert.textContent = "";
+    appAlert.className = "alert alert-success py-1 small d-none";
   }
   try {
     const res = await fetch(SETTINGS_API, { headers: getAuthHeaders() });
@@ -324,6 +378,89 @@ function initNavRefreshButton() {
   });
 }
 
+function initStatCardInteractions() {
+  const cards = document.querySelectorAll(".stat-card-interactive[data-stat-detail]");
+  if (!cards.length) return;
+
+  cards.forEach((card) => {
+    card.addEventListener("click", () => {
+      const alreadyExpanded = card.classList.contains("is-expanded");
+      cards.forEach((c) => c.classList.remove("is-expanded"));
+      if (!alreadyExpanded) {
+        card.classList.add("is-expanded");
+      }
+    });
+  });
+}
+
+function initGlobalReceiptOpenHandler() {
+  try {
+    window.addEventListener("app:open-receipt", (event) => {
+      try {
+        const detail = event && event.detail ? event.detail : {};
+        const saleId = detail.saleId || detail.sale_id || detail.id;
+        if (!saleId) return;
+
+        if (document.body && document.body.dataset.page === "sales" && typeof window.openReceiptForSale === "function") {
+          window.openReceiptForSale(saleId);
+          return;
+        }
+
+        const url = new URL("./sales.html", window.location.href);
+        url.searchParams.set("openReceiptSaleId", String(saleId));
+        window.location.href = url.toString();
+      } catch (err) {
+        console.error("Failed to handle app:open-receipt event:", err);
+      }
+    });
+  } catch (err) {
+    console.error("Failed to initialize global receipt handler:", err);
+  }
+}
+
+function initGlobalSlashSearchShortcut() {
+  window.addEventListener("keydown", (event) => {
+    if (event.key !== "/" || event.defaultPrevented) return;
+
+    const active = document.activeElement;
+    if (
+      !active ||
+      active === document.body ||
+      active === document.documentElement
+    ) {
+      // ok
+    } else {
+      const tag = active.tagName ? active.tagName.toLowerCase() : "";
+      const isEditable =
+        tag === "input" ||
+        tag === "textarea" ||
+        active.isContentEditable === true ||
+        active.getAttribute?.("contenteditable") === "true";
+      if (isEditable) {
+        return;
+      }
+    }
+
+    const page = document.body?.dataset?.page || "";
+    let input = null;
+    if (page === "customers") {
+      input = document.getElementById("customer-search");
+    } else if (page === "payments") {
+      input = document.getElementById("payments-search");
+    } else if (page === "products") {
+      input = document.getElementById("product-search-filter");
+    } else if (page === "sales") {
+      input = document.getElementById("sales-search");
+    }
+
+    if (input && typeof input.focus === "function") {
+      event.preventDefault();
+      input.focus();
+      if (typeof input.select === "function") input.select();
+    }
+  });
+}
+
 function initClientIdSettingsModal() {
   // Central address: segmented IPv4 input (dots are separators, not editable characters)
   bindCentralIpv4Behavior();
@@ -386,64 +523,9 @@ function initClientIdSettingsModal() {
     }
 
     try {
-      // First, check if the requested Client ID is available on central.
-      // This avoids accidental duplicates across branches/devices.
-      try {
-        const params = new URLSearchParams();
-        params.set("clientId", cid);
-        if (centralParsed.url) {
-          // Allow backend to use the just-entered central URL even before it's saved.
-          params.set("centralUrl", centralParsed.url);
-        }
-
-        const checkRes = await fetch(`${SYNC_CLIENT_CHECK_API}?${params.toString()}`, {
-          headers: getAuthHeaders(),
-        });
-        const checkData = await checkRes.json().catch(() => ({}));
-
-        // If central explicitly reports the ID as taken or unavailable, block the save.
-        if (!checkRes.ok) {
-          const taken =
-            checkRes.status === 409 ||
-            checkData.available === false ||
-            checkData.status === "taken" ||
-            checkData.status === "used" ||
-            checkData.status === "exists";
-          if (feedback) {
-            feedback.textContent =
-              checkData.message ||
-              (taken
-                ? "That Client ID is already in use."
-                : "Could not verify if this Client ID is available. Try again.");
-            feedback.className = "small mt-2 text-danger";
-          }
-          return;
-        }
-
-        // For 2xx responses, only allow saving when central explicitly confirms availability.
-        const explicitlyAvailable =
-          checkData &&
-          (checkData.available === true ||
-            checkData.status === "available" ||
-            checkData.status === "ok" ||
-            checkData.result === "available");
-        if (!explicitlyAvailable) {
-          if (feedback) {
-            feedback.textContent =
-              checkData.message || "That Client ID is already in use.";
-            feedback.className = "small mt-2 text-danger";
-          }
-          return;
-        }
-      } catch {
-        if (feedback) {
-          feedback.textContent =
-            "Could not contact central to verify this Client ID. Check the address and try again.";
-          feedback.className = "small mt-2 text-danger";
-        }
-        return;
-      }
-
+      // Save settings without blocking on central Client ID checks.
+      // Connectivity and ID uniqueness can be verified separately using
+      // the "Test connection" button.
       if (feedback) {
         feedback.textContent = "Saving…";
         feedback.className = "small mt-2 text-muted";
@@ -478,6 +560,11 @@ function initClientIdSettingsModal() {
         localStorage.setItem("sm_client_id", cid);
       } catch (_) {
         // Ignore local storage failures; server-side Client ID is still saved.
+      }
+      const appAlert = document.getElementById("app-settings-alert");
+      if (appAlert) {
+        appAlert.textContent = "App settings saved.";
+        appAlert.className = "alert alert-success py-1 small";
       }
       if (centralFeedback && data && typeof data.central_api_url === "string") {
         setCentralAddressUIFromUrl(data.central_api_url);
@@ -532,7 +619,24 @@ function initClientIdSettingsModal() {
       centralFeedback.className = "small mt-1 text-muted";
     }
     try {
-      const res = await fetch(SYNC_STATUS_API, { headers: getAuthHeaders() });
+      const centralParsed = parseCentralAddressFromUI();
+      if (!centralParsed.ok) {
+        if (centralFeedback) {
+          centralFeedback.textContent = centralParsed.message || "Invalid central server address.";
+          centralFeedback.className = "small mt-1 text-danger";
+        }
+        stopLoading();
+        return;
+      }
+
+      let statusUrl = SYNC_STATUS_API;
+      const params = new URLSearchParams();
+      if (centralParsed.url) {
+        params.set("centralUrl", centralParsed.url);
+        statusUrl = `${SYNC_STATUS_API}?${params.toString()}`;
+      }
+
+      const res = await fetchWithTimeout(statusUrl, { headers: getAuthHeaders() }, 5000);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         if (centralFeedback) {
@@ -627,28 +731,77 @@ function initSyncStatusPolling() {
 async function loadDashboardOverview() {
   try {
     const res = await fetch(DASHBOARD_API, { headers: getAuthHeaders() });
-    if (!res.ok) return;
-    const data = await res.json();
+    if (!res.ok) {
+      console.warn("[Dashboard] overview API not ok:", res.status, res.statusText);
+      return;
+    }
+    const data = await res.json().catch((parseErr) => {
+      console.warn("[Dashboard] overview JSON parse failed:", parseErr?.message || parseErr);
+      return null;
+    });
+    if (!data || typeof data !== "object") {
+      console.warn("[Dashboard] overview data missing or invalid");
+      return;
+    }
+    // Log why Top 5 / Recent Activity might be empty
+    const topProducts = Array.isArray(data.topProducts) ? data.topProducts : [];
+    const recentActivity = Array.isArray(data.recentActivity) ? data.recentActivity : [];
+    console.log("[Dashboard] overview loaded:", {
+      topProductsCount: topProducts.length,
+      recentActivityCount: recentActivity.length,
+      todaySalesAmount: data.todaySalesAmount,
+      todaySalesCount: data.todaySalesCount,
+    });
+    if (!topProducts.length && (data.todaySalesAmount > 0 || data.todaySalesCount > 0)) {
+      console.warn("[Dashboard] Top 5 products is empty but sales exist — check backend 'this month' filter or sale_items join.");
+    }
+    if (!recentActivity.length && (data.todaySalesAmount > 0 || data.todaySalesCount > 0)) {
+      console.warn("[Dashboard] Recent activity is empty but sales exist — check backend sales/payments queries.");
+    }
 
     // Today sales
     const todaySalesEl = document.getElementById("stat-today-sales");
     const todayMetaEl = document.getElementById("stat-today-meta");
+    const todayAvgEl = document.getElementById("stat-today-avg");
+    const todayMaxEl = document.getElementById("stat-today-max");
+    const todayLastEl = document.getElementById("stat-today-last");
+    const todayAmount = Number(data.todaySalesAmount || 0);
+    const todayCount = Number(data.todaySalesCount || 0);
     if (todaySalesEl) {
-      todaySalesEl.textContent = `₱${Number(data.todaySalesAmount || 0).toFixed(2)}`;
+      todaySalesEl.textContent = `₱${todayAmount.toFixed(2)}`;
     }
     if (todayMetaEl) {
-      const txCount = data.todaySalesCount || 0;
-      todayMetaEl.textContent = txCount === 1 ? "1 transaction today" : `${txCount} transactions today`;
+      todayMetaEl.textContent =
+        todayCount === 1 ? "1 transaction today" : `${todayCount} transactions today`;
+    }
+    if (todayAvgEl) {
+      const avg = todayCount > 0 ? todayAmount / todayCount : 0;
+      todayAvgEl.textContent = `₱${avg.toFixed(2)}`;
+    }
+    if (todayMaxEl) {
+      const max = Number(data.todayMaxSaleAmount || 0);
+      todayMaxEl.textContent = `₱${max.toFixed(2)}`;
+    }
+    if (todayLastEl) {
+      const last = data.todayLastSaleAt
+        ? new Date(data.todayLastSaleAt).toLocaleTimeString()
+        : "—";
+      todayLastEl.textContent = last;
     }
 
     // Outstanding balance
     const balEl = document.getElementById("stat-outstanding-balance");
     const balMetaEl = document.getElementById("stat-balance-meta");
+    const balAvgEl = document.getElementById("stat-balance-avg");
+    const balMaxEl = document.getElementById("stat-balance-max");
+    const balRiskEl = document.getElementById("stat-balance-risk");
+    const outstanding = Number(data.outstandingBalance || 0);
+    const customersWithBal = Number(data.customersWithBalance || 0);
     if (balEl) {
-      balEl.textContent = `₱${Number(data.outstandingBalance || 0).toFixed(2)}`;
+      balEl.textContent = `₱${outstanding.toFixed(2)}`;
     }
     if (balMetaEl) {
-      const count = data.customersWithBalance || 0;
+      const count = customersWithBal;
       balMetaEl.textContent =
         count === 0
           ? "0 customers with balance"
@@ -656,11 +809,49 @@ async function loadDashboardOverview() {
           ? "1 customer with balance"
           : `${count} customers with balance`;
     }
+    if (balAvgEl) {
+      const avgBal = customersWithBal > 0 ? outstanding / customersWithBal : 0;
+      balAvgEl.textContent = `₱${avgBal.toFixed(2)}`;
+    }
+    if (balMaxEl) {
+      const maxBal = Number(data.maxCustomerBalance || 0);
+      balMaxEl.textContent = `₱${maxBal.toFixed(2)}`;
+    }
+    if (balRiskEl) {
+      balRiskEl.textContent = String(data.customersNearLimit || 0);
+    }
 
     // Low stock items
     const lowStockEl = document.getElementById("stat-low-stock");
+    const stockCriticalEl = document.getElementById("stat-stock-critical");
+    const stockLowEl = document.getElementById("stat-stock-low");
+    const stockProductsEl = document.getElementById("stat-stock-products");
     if (lowStockEl) {
       lowStockEl.textContent = String(data.lowStockCount || 0);
+    }
+    if (stockCriticalEl) {
+      stockCriticalEl.textContent = String(data.lowStockCriticalCount || 0);
+    }
+    if (stockLowEl) {
+      stockLowEl.textContent = String(data.lowStockBelowMinCount || 0);
+    }
+    if (stockProductsEl) {
+      const products = Array.isArray(data.lowStockProducts)
+        ? data.lowStockProducts
+        : [];
+      if (!products.length) {
+        stockProductsEl.innerHTML =
+          '<li><span>Products at low stock</span><span>—</span></li>';
+      } else {
+        stockProductsEl.innerHTML = products
+          .map(
+            (p) =>
+              `<li><span>${escapeHtml(p.name)}</span><span>Qty ${Number(
+                p.stock_quantity || 0
+              )}</span></li>`
+          )
+          .join("");
+      }
     }
 
     // Top 5 products
@@ -675,13 +866,23 @@ async function loadDashboardOverview() {
           </li>`;
       } else {
         topList.innerHTML = top
-          .map(
-            (p) => `
+          .map((p, index) => {
+            const rank = index + 1;
+            const color =
+              rank === 1 ? "#d4af37" : // gold
+              rank === 2 ? "#c0c0c0" : // silver
+              rank === 3 ? "#cd7f32" : // bronze
+              "#e9ecef";
+            const textColor = rank <= 3 ? "#212529" : "#6c757d";
+            return `
           <li class="d-flex justify-content-between align-items-center py-1 border-bottom">
-            <span>${p.name}</span>
+            <span>
+              <span class="badge me-2" style="min-width:1.5rem; text-align:center; border-radius:999px; background-color:${color}; color:${textColor};">${rank}</span>
+              ${p.name}
+            </span>
             <span>₱${Number(p.total_amount || 0).toFixed(2)}</span>
-          </li>`
-          )
+          </li>`;
+          })
           .join("");
       }
     }
@@ -690,7 +891,31 @@ async function loadDashboardOverview() {
     const activityList = document.getElementById("activity-list");
     if (activityList) {
       const items = Array.isArray(data.recentActivity) ? data.recentActivity : [];
-      if (!items.length) return;
+      if (!items.length) {
+        activityList.innerHTML = `
+          <li class="activity-item">
+            <div class="activity-icon sale"><i class="bi bi-receipt"></i></div>
+            <div class="activity-body">
+              <div class="activity-title">No recent activity yet</div>
+              <div class="activity-meta">Sales and payments will appear here.</div>
+            </div>
+          </li>
+          <li class="activity-item">
+            <div class="activity-icon payment"><i class="bi bi-cash-coin"></i></div>
+            <div class="activity-body">
+              <div class="activity-title">Record a payment</div>
+              <div class="activity-meta">Go to Payments to update customer balances.</div>
+            </div>
+          </li>
+          <li class="activity-item">
+            <div class="activity-icon product"><i class="bi bi-box-seam"></i></div>
+            <div class="activity-body">
+              <div class="activity-title">Manage products</div>
+              <div class="activity-meta">Add products and set stock levels in Products.</div>
+            </div>
+          </li>`;
+        return;
+      }
 
       const renderItem = (a, isExtra = false) => {
         let iconClass = "bi-activity";
@@ -765,8 +990,10 @@ async function loadDashboardOverview() {
         }
       }
     }
-  } catch {
-    
+  } catch (err) {
+    console.warn("loadDashboardOverview failed:", err?.message || err);
+  } finally {
+    document.body.classList.remove("page-loading");
   }
 }
 
@@ -868,6 +1095,14 @@ const ensureAuthenticated = async () => {
     window.location.href = "/";
   } finally {
     document.body.classList.remove("page-loading");
+    // Prevent layout jump on refresh: show content from top (like dashboard) so buttons stay clickable
+    if (typeof window !== "undefined") {
+      window.scrollTo(0, 0);
+      if (document.documentElement) document.documentElement.scrollTop = 0;
+      if (document.body) document.body.scrollTop = 0;
+      var m = document.querySelector(".app-main");
+      if (m) m.scrollTop = 0;
+    }
   }
 };
 
@@ -880,17 +1115,31 @@ if (logoutBtn) {
 }
 
 window.addEventListener("DOMContentLoaded", () => {
+  // Prevent browser from restoring scroll on refresh so our scroll-to-top after auth is consistent
+  try {
+    if (typeof history !== "undefined" && history.scrollRestoration) {
+      history.scrollRestoration = "manual";
+    }
+  } catch (_) {}
+
   highlightActiveNav();
   initSyncStatusPolling();
   initNavRefreshButton();
+  initStatCardInteractions();
+  initGlobalReceiptOpenHandler();
   initClientIdSettingsModal();
   initOpenInAppOrWebLink();
+  initGlobalSlashSearchShortcut();
 
-  ensureAuthenticated().catch(() => {
-    document.body.classList.remove("page-loading");
-  });
-
-  loadDashboardOverview();
+  ensureAuthenticated()
+    .then(() => {
+      if (document.body?.dataset?.page === "overview") {
+        loadDashboardOverview();
+      }
+    })
+    .catch(() => {
+      document.body.classList.remove("page-loading");
+    });
 });
 
 window.addEventListener("pjax:complete", (e) => {

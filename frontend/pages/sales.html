@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Sales - D&amp;M Sales</title>
     <link rel="stylesheet" href="/css/bootstrap.min.css" />
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" crossorigin="anonymous" />
+    <link rel="stylesheet" href="/vendor/bootstrap-icons/font/bootstrap-icons.min.css" />
     <link rel="stylesheet" href="../css/dashboard.css" />
   </head>
   <body data-page="sales" class="page-loading">
@@ -58,6 +58,8 @@
               <option value="paid">Paid</option>
               <option value="partial">Partial</option>
               <option value="unpaid">Unpaid</option>
+              <option value="voided">Voided</option>
+              <option value="refunded">Refunded</option>
             </select>
             <button class="btn btn-primary btn-sm" type="button" id="btn-sales-search">
               <i class="bi bi-funnel"></i> Apply
@@ -88,6 +90,58 @@
             </div>
             <div class="data-view-cards data-card-grid"></div>
             <div class="data-view-kanban"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Left panel: Receipt (wider ~60%) — opens when Preview is clicked -->
+      <div id="receipt-preview-panel" class="receipt-panel receipt-panel-left" aria-hidden="true">
+        <div class="receipt-panel-inner">
+          <div class="receipt-panel-header d-flex justify-content-between align-items-center">
+            <h5 class="mb-0">
+              <i class="bi bi-eye-slash text-primary me-2 receipt-preview-header-eye" id="receipt-preview-header-eye-icon" aria-label="Receipt preview closed"></i>
+              Receipt – <span id="receipt-preview-sale-id"></span>
+            </h5>
+            <button type="button" class="btn btn-link btn-sm p-0 text-muted receipt-panel-close" data-panel="left" aria-label="Close">
+              <i class="bi bi-x-lg"></i>
+            </button>
+          </div>
+          <div class="receipt-panel-body bg-white rounded" id="receipt-preview-content">
+            <p class="text-muted small mb-0">Click Preview in the right panel to view the receipt.</p>
+          </div>
+          <div class="receipt-panel-footer d-flex flex-wrap justify-content-end gap-2 align-items-center">
+            <p class="text-muted small mb-0 me-auto">You can review the receipt above before printing.</p>
+            <button type="button" class="btn btn-outline-secondary btn-sm receipt-panel-close" data-panel="left">Close</button>
+            <button type="button" class="btn btn-primary btn-sm" id="btn-print-receipt-panel">
+              <i class="bi bi-printer"></i> Print
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right panel: Receipt history (narrower ~40%) — opens when receipt icon in Actions is clicked -->
+      <div id="receipt-history-panel" class="receipt-panel receipt-panel-right" aria-hidden="true">
+        <div class="receipt-panel-inner">
+          <div class="receipt-panel-header d-flex justify-content-between align-items-center">
+            <h5 class="mb-0">
+              <i class="bi bi-clock-history me-2"></i>
+              Receipt history – <span id="receipt-history-sale-id-panel"></span>
+            </h5>
+            <button type="button" class="btn btn-link btn-sm p-0 text-muted receipt-panel-close" data-panel="right" aria-label="Close">
+              <i class="bi bi-x-lg"></i>
+            </button>
+          </div>
+          <div class="receipt-panel-body">
+            <div id="receipt-history-body-panel" class="small text-muted">
+              Loading history…
+            </div>
+          </div>
+          <div class="receipt-panel-footer d-flex flex-wrap justify-content-end gap-2">
+            <button type="button" class="btn btn-outline-secondary btn-sm receipt-panel-close" data-panel="right">Close</button>
+            <button type="button" class="btn btn-primary btn-sm" id="btn-preview-latest-receipt-panel" title="Preview receipt in left panel" data-preview-state="closed">
+              <i class="bi bi-eye-slash receipt-preview-eye-icon" id="receipt-preview-eye-icon" aria-label="Receipt preview closed"></i>
+              <span class="ms-1 receipt-preview-eye-label">Preview latest receipt</span>
+            </button>
           </div>
         </div>
       </div>
@@ -227,8 +281,8 @@
                   <div class="card-body">
                     <h6 class="card-title mb-2">Manual verification</h6>
                     <label class="form-label small mb-1">Reference no. <span class="text-danger">*</span></label>
-                    <input type="text" class="form-control" id="sale-payment-reference" placeholder="Enter reference number from buyer (e.g. GCash)" autocomplete="off" />
-                    <small class="text-muted">Required for GCash/PayMaya. Saved with this sale and shown on the Payments page.</small>
+                    <input type="text" class="form-control" id="sale-payment-reference" placeholder="GCash: digits only. Maya: letters and numbers. Max 14 characters." maxlength="14" autocomplete="off" />
+                    <small class="text-muted">Required for GCash/PayMaya. GCash: numeric only. Maya: letters and numbers. Max 14 characters.</small>
                     <div id="sale-payment-reference-error" class="invalid-feedback">Please enter the reference number.</div>
                   </div>
                 </div>
@@ -289,6 +343,32 @@
           </div>
         </div>
       </div>
+      </div>
+
+      <!-- Receipt & Payment History Modal -->
+      <div class="modal fade" id="receiptHistoryModal" tabindex="-1" aria-labelledby="receiptHistoryModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title" id="receiptHistoryModalLabel">
+                <i class="bi bi-clock-history me-2"></i>
+                Receipt &amp; payment history – <span id="receipt-history-sale-id"></span>
+              </h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+              <div id="receipt-history-body" class="small text-muted">
+                Loading history…
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+              <button type="button" class="btn btn-primary btn-sm" id="btn-preview-latest-receipt">
+                <i class="bi bi-receipt"></i> Preview latest receipt
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- Flag Issue Modal (cashiers/staff) -->

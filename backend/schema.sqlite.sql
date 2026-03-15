@@ -51,6 +51,8 @@ CREATE TABLE IF NOT EXISTS sales (
   customer_id INTEGER,
   transaction_type TEXT DEFAULT 'walk-in' CHECK (transaction_type IN ('walk-in', 'online')),
   customer_name TEXT,
+  customer_contact TEXT,
+  customer_address TEXT,
   or_number TEXT,
   total_amount REAL NOT NULL DEFAULT 0,
   amount_paid REAL NOT NULL DEFAULT 0,

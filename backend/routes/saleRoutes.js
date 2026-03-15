@@ -106,6 +106,11 @@ router.get("/", async (req, res) => {
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 100);
     const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
 
+    const isIssueStatusFilter = status === "voided" || status === "refunded";
+    if (isIssueStatusFilter && !hasIssues) {
+      return res.json({ sales: [], total: 0, hasMore: false });
+    }
+
     const params = [];
     const whereParts = [];
 
@@ -118,12 +123,23 @@ router.get("/", async (req, res) => {
       params.push(`%${q}%`, `%${q.toLowerCase()}%`, `%${q.toLowerCase()}%`);
     }
 
-    if (status) {
+    if (status && !isIssueStatusFilter) {
       whereParts.push("LOWER(s.status) = ?");
+      params.push(status);
+    }
+    if (isIssueStatusFilter) {
+      whereParts.push(
+        "EXISTS (SELECT 1 FROM sale_issues si WHERE si.sale_id = s.sale_id AND si.status = ?)"
+      );
       params.push(status);
     }
 
     const whereSql = whereParts.length ? "WHERE " + whereParts.join(" AND ") : "";
+
+    // Order: voided/refunded sales at the bottom (when issue table exists)
+    const orderByVoidRefundLast = hasIssues
+      ? "(SELECT 1 FROM sale_issues si WHERE si.sale_id = s.sale_id AND si.status IN ('voided','refunded') LIMIT 1) ASC, "
+      : "";
 
     const baseSelect = hasCustomerName
       ? `SELECT s.sale_id AS id, s.customer_id, COALESCE(c.name, s.customer_name) AS customer_name,
@@ -149,8 +165,9 @@ router.get("/", async (req, res) => {
       return res.json({ sales: [], total: 0, hasMore: false });
     }
 
-    // Paged query
-    const query = `${baseSelect} ${whereSql} ORDER BY s.sale_date DESC, s.sale_id DESC LIMIT ? OFFSET ?`;
+    // Paged query: voided/refunded sales last, then by date desc
+    const orderSql = `ORDER BY ${orderByVoidRefundLast}s.sale_date DESC, s.sale_id DESC LIMIT ? OFFSET ?`;
+    const query = `${baseSelect} ${whereSql} ${orderSql}`;
     const [rows] = await pool.query(query, [...params, limit, offset]);
 
     if (!rows.length) {
@@ -187,8 +204,9 @@ router.get("/", async (req, res) => {
           : null;
     }
 
-    // Open issue indicator per sale (if table exists)
+    // Open issue indicator and voided/refunded resolution status per sale (if table exists)
     let openIssuesBySale = {};
+    let issueResolutionBySale = {};
     if (hasIssues) {
       const [issueRows] = await pool.query(
         `SELECT sale_id, COUNT(*) AS open_count
@@ -200,6 +218,18 @@ router.get("/", async (req, res) => {
       openIssuesBySale = Object.fromEntries(
         (issueRows || []).map((row) => [row.sale_id, Number(row.open_count) || 0])
       );
+      const [resolutionRows] = await pool.query(
+        `SELECT sale_id, status
+         FROM sale_issues
+         WHERE sale_id IN (?) AND status IN ('voided','refunded')
+         ORDER BY resolved_at DESC, issue_id DESC`,
+        [saleIds]
+      );
+      for (const row of resolutionRows || []) {
+        if (issueResolutionBySale[row.sale_id] == null) {
+          issueResolutionBySale[row.sale_id] = row.status;
+        }
+      }
     }
 
     const salesWithMethod = rows.map((r) => ({
@@ -208,6 +238,7 @@ router.get("/", async (req, res) => {
       payment_method: payBySale[r.id] || "cash",
       reference_number: refBySale[r.id] ?? null,
       has_open_issue: hasIssues ? Boolean(openIssuesBySale[r.id]) : false,
+      issue_resolution_status: hasIssues ? (issueResolutionBySale[r.id] || null) : null,
     }));
 
     return res.json({
@@ -353,6 +384,7 @@ router.post("/", async (req, res) => {
     const hasTransactionType = columns.includes("transaction_type");
     const hasCustomerName = columns.includes("customer_name");
     const hasOrNumber = columns.includes("or_number");
+    const hasSalesContactAddress = columns.includes("customer_contact") && columns.includes("customer_address");
     const hasNewColumns = hasTransactionType && hasCustomerName;
     
     // Validate new fields only if columns exist
@@ -455,10 +487,18 @@ router.post("/", async (req, res) => {
 
     // Build INSERT query based on whether new columns exist
     let insertQuery, insertValues;
-    if (hasNewColumns && hasOrNumber) {
+    if (hasNewColumns && hasOrNumber && hasSalesContactAddress) {
+      insertQuery = `INSERT INTO sales (customer_id, customer_name, transaction_type, customer_contact, customer_address, or_number, total_amount, amount_paid, remaining_balance, status, sale_date)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))`;
+      insertValues = [custId, customer_name.trim(), transaction_type, contact, address, orNumber, totalAmount, paid, remaining, status];
+    } else if (hasNewColumns && hasOrNumber) {
       insertQuery = `INSERT INTO sales (customer_id, customer_name, transaction_type, or_number, total_amount, amount_paid, remaining_balance, status, sale_date)
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))`;
       insertValues = [custId, customer_name.trim(), transaction_type, orNumber, totalAmount, paid, remaining, status];
+    } else if (hasNewColumns && hasSalesContactAddress) {
+      insertQuery = `INSERT INTO sales (customer_id, customer_name, transaction_type, customer_contact, customer_address, total_amount, amount_paid, remaining_balance, status, sale_date)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))`;
+      insertValues = [custId, customer_name.trim(), transaction_type, contact, address, totalAmount, paid, remaining, status];
     } else if (hasNewColumns) {
       insertQuery = `INSERT INTO sales (customer_id, customer_name, transaction_type, total_amount, amount_paid, remaining_balance, status, sale_date)
                      VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now','localtime'))`;
@@ -509,18 +549,17 @@ router.post("/", async (req, res) => {
           totalAmount,
         ]
       );
-      // Keep only the latest 10 activity entries (local-only, not synced to central)
+      // Keep only the latest 50 activity entries (local-only, not synced to central)
       await conn.query(
         `DELETE FROM activity_log
          WHERE activity_id NOT IN (
-           SELECT activity_id
-           FROM activity_log
-           ORDER BY datetime(created_at) DESC, activity_id DESC
-           LIMIT 10
+           SELECT activity_id FROM activity_log
+           ORDER BY created_at DESC, activity_id DESC
+           LIMIT 50
          )`
       );
-    } catch (_) {
-      // Activity log failure should not break main transaction
+    } catch (activityErr) {
+      console.warn("activity_log insert/trim failed (sale):", activityErr?.message || activityErr);
     }
 
     await conn.commit();
@@ -826,7 +865,7 @@ router.post("/:id/payments", async (req, res) => {
       );
     }
 
-    // Log payment into activity_log
+    // Log payment into activity_log (for dashboard recent activity)
     try {
       await conn.query(
         "INSERT INTO activity_log (type, title, details, amount, created_at) VALUES (?, ?, ?, ?, datetime('now','localtime'))",
@@ -837,17 +876,18 @@ router.post("/:id/payments", async (req, res) => {
           amountRounded,
         ]
       );
-      // Keep only the latest 10 activity entries (local-only, not synced to central)
+      // Keep only the latest 50 activity entries (local-only, not synced to central)
       await conn.query(
         `DELETE FROM activity_log
          WHERE activity_id NOT IN (
-           SELECT activity_id
-           FROM activity_log
-           ORDER BY datetime(created_at) DESC, activity_id DESC
-           LIMIT 10
+           SELECT activity_id FROM activity_log
+           ORDER BY created_at DESC, activity_id DESC
+           LIMIT 50
          )`
       );
-    } catch (_) {}
+    } catch (activityErr) {
+      console.warn("activity_log insert/trim failed (payment):", activityErr?.message || activityErr);
+    }
 
     await conn.commit();
 

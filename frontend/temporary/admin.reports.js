@@ -1,43 +1,5 @@
 const REPORTS_API = "/api/reports";
 
-let chartReadyPromise = null;
-
-function ensureChartLoaded() {
-  if (typeof window === "undefined") return Promise.reject(new Error("Window not available"));
-  if (typeof window.Chart === "function") return Promise.resolve(window.Chart);
-
-  if (!chartReadyPromise) {
-    chartReadyPromise = new Promise((resolve, reject) => {
-      const existing = document.querySelector('script[data-chartjs-autoload="1"]');
-      if (existing) {
-        existing.addEventListener("load", () => {
-          if (typeof window.Chart === "function") resolve(window.Chart);
-          else reject(new Error("Chart.js script loaded but Chart is still undefined"));
-        });
-        existing.addEventListener("error", () => {
-          reject(new Error("Failed to load Chart.js script"));
-        });
-        return;
-      }
-
-      const script = document.createElement("script");
-      script.src = "/vendor/chart.js/dist/chart.umd.js";
-      script.async = true;
-      script.dataset.chartjsAutoload = "1";
-      script.addEventListener("load", () => {
-        if (typeof window.Chart === "function") resolve(window.Chart);
-        else reject(new Error("Chart.js script loaded but Chart is still undefined"));
-      });
-      script.addEventListener("error", () => {
-        reject(new Error("Failed to load Chart.js script"));
-      });
-      document.head.appendChild(script);
-    });
-  }
-
-  return chartReadyPromise;
-}
-
 let dailySalesChart = null;
 let topProductsChart = null;
 let customerBalancesChart = null;
@@ -295,16 +257,10 @@ function renderTopProducts(collections) {
   }
   toggleEmpty("empty-top-products", false);
 
-  docs.sort(
-    (a, b) =>
-      toNumber(b.totalQty ?? b.total_qty ?? b.qty ?? b.count) -
-      toNumber(a.totalQty ?? a.total_qty ?? a.qty ?? a.count),
-  );
+  docs.sort((a, b) => toNumber(b.totalQty ?? b.total_qty ?? b.qty ?? b.count) - toNumber(a.totalQty ?? a.total_qty ?? a.qty ?? a.count));
 
   const top = docs.slice(0, 10);
-  const labels = top.map((d) =>
-    (d.productName ?? d.product_name ?? d.name ?? "Product").toString().replace(/\s+/g, " ").trim(),
-  );
+  const labels = top.map((d) => (d.productName ?? d.product_name ?? d.name ?? "Product").toString().replace(/\s+/g, " ").trim());
   const values = top.map((d) => toNumber(d.totalQty ?? d.total_qty ?? d.qty ?? d.count));
   const productsAxisMax = computeAxisMax(values);
 
@@ -403,17 +359,11 @@ function renderCustomerBalances(collections) {
   }
   toggleEmpty("empty-customer-balances", false);
 
-  docs.sort(
-    (a, b) =>
-      toNumber(b.balance ?? b.totalBalance ?? b.total_balance) -
-      toNumber(a.balance ?? a.totalBalance ?? a.total_balance),
-  );
+  docs.sort((a, b) => toNumber(b.balance ?? b.totalBalance ?? b.total_balance) - toNumber(a.balance ?? a.totalBalance ?? a.total_balance));
 
   const top = docs.slice(0, 10);
   const visibleCount = Math.min(5, top.length);
-  const names = top.map((d) =>
-    (d.customerName ?? d.customer_name ?? d.name ?? "Customer").toString().replace(/\s+/g, " ").trim(),
-  );
+  const names = top.map((d) => (d.customerName ?? d.customer_name ?? d.name ?? "Customer").toString().replace(/\s+/g, " ").trim());
   const values = top.map((d) => toNumber(d.balance ?? d.totalBalance ?? d.total_balance));
   const ids = top.map((d) => (d.customerId ?? d.customer_id ?? d.id ?? "").toString());
   const balancesAxisMax = computeAxisMax(values);
@@ -690,10 +640,7 @@ function setKpis(summary) {
   if (salesEl) salesEl.textContent = fmtPeso(totals.totalSales || 0);
   if (payEl) payEl.textContent = fmtPeso(totals.totalPayments || 0);
   if (outEl) outEl.textContent = fmtPeso(totals.outstandingBalance || 0);
-  if (txEl) {
-    if (totals.totalTransactions == null) txEl.textContent = "—";
-    else txEl.textContent = fmtCount(totals.totalTransactions || 0);
-  }
+  if (txEl) txEl.textContent = fmtCount(totals.totalTransactions || 0);
 
   const salesDeltaEl = document.getElementById("kpi-total-sales-delta");
   const payDeltaEl = document.getElementById("kpi-total-payments-delta");
@@ -721,16 +668,9 @@ function setKpis(summary) {
     payDeltaEl.className = `stat-meta ${pPct == null ? "text-muted" : pPct >= 0 ? "text-success" : "text-danger"}`;
   }
   if (txDeltaEl) {
-    if (totals.totalTransactions == null) {
-      txDeltaEl.textContent = "Not available in Mongo";
-      txDeltaEl.className = "stat-meta text-muted";
-    } else if (tPct == null) {
-      txDeltaEl.textContent = "No previous period";
-      txDeltaEl.className = "stat-meta text-muted";
-    } else {
-      txDeltaEl.textContent = `${tPct >= 0 ? "▲" : "▼"} ${Math.abs(tPct).toFixed(1)}% vs previous`;
-      txDeltaEl.className = `stat-meta ${tPct >= 0 ? "text-success" : "text-danger"}`;
-    }
+    if (tPct == null) txDeltaEl.textContent = "No previous period";
+    else txDeltaEl.textContent = `${tPct >= 0 ? "▲" : "▼"} ${Math.abs(tPct).toFixed(1)}% vs previous`;
+    txDeltaEl.className = `stat-meta ${tPct == null ? "text-muted" : tPct >= 0 ? "text-success" : "text-danger"}`;
   }
 }
 
@@ -755,8 +695,6 @@ function setRangeLabel(summary, collections) {
 
 async function loadReportsAndRender({ force = false } = {}) {
   try {
-    // Ensure Chart.js is available before rendering any charts.
-    await ensureChartLoaded();
     setOfflineIndicator();
     setLoading(true);
     setStatus("Loading reports…", "info");
@@ -773,9 +711,6 @@ async function loadReportsAndRender({ force = false } = {}) {
 
     setStatus("Reports loaded.", "success");
     document.body.classList.remove("page-loading");
-    window.scrollTo(0, 0);
-    var m = document.querySelector(".app-main");
-    if (m) m.scrollTop = 0;
   } catch (err) {
     console.error("load reports error", err);
     setStatus(err.message || "Failed to load reports.", "danger");
@@ -905,6 +840,9 @@ function onReportsDomReady() {
 if (document.readyState === "loading") {
   window.addEventListener("DOMContentLoaded", onReportsDomReady);
 } else {
+  // When this module is loaded after DOMContentLoaded (for example,
+  // when navigating via the in-app PJAX router), run initialization
+  // immediately so the Refresh button and date pickers are wired up.
   onReportsDomReady();
 }
 

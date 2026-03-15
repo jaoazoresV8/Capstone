@@ -554,7 +554,9 @@ function validateSupplierDetailsForSubmit() {
 
 function computeSellingPrice() {
   const supplierPrice = parseFloat(document.getElementById("product-supplier-price")?.value) || 0;
-  const selling = supplierPrice * (1 + globalMarkupPercent / 100);
+  // Margin-based: Selling Price = Cost / (1 - Margin). e.g. 14% margin => cost / (1 - 0.14) = cost / 0.86
+  const marginPct = Math.min(globalMarkupPercent, 99.99);
+  const selling = marginPct >= 100 ? supplierPrice : supplierPrice / (1 - marginPct / 100);
   const sellingEl = document.getElementById("product-selling-price");
   if (sellingEl) {
     sellingEl.value = (Math.round(selling * 100) / 100).toFixed(2);
@@ -781,8 +783,8 @@ document.addEventListener("click", (e) => {
     const input = document.getElementById("products-markup-percent");
     if (!input) return;
     const value = parseFloat(input.value);
-    if (isNaN(value) || value < 0 || value > 999) {
-      showAlert("Enter a markup between 0 and 999.", "warning");
+    if (isNaN(value) || value < 0 || value >= 100) {
+      showAlert("Enter a margin between 0 and 99.99 (e.g. 14 for 14% profit margin).", "warning");
       return;
     }
     fetch(SETTINGS_API, {
@@ -794,10 +796,10 @@ document.addEventListener("click", (e) => {
       .then((data) => {
         globalMarkupPercent = data.markup_percent;
         if (input) input.value = data.markup_percent;
-        showAlert("Markup updated. All product selling prices have been recalculated.", "success");
+        showAlert("Margin updated. All product selling prices have been recalculated.", "success");
         applyProductsFilter();
       })
-      .catch((err) => showAlert(err.message || "Failed to update markup.", "danger"));
+      .catch((err) => showAlert(err.message || "Failed to update margin.", "danger"));
     return;
   }
   if (e.target.closest("#btn-product-add-category")) {

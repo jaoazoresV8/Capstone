@@ -2,15 +2,25 @@
  * Sales page: 3-step New Sale (Customer → Items → Payment), list sales, receipt.
  * Uses event delegation so "New Sale" works after pjax load.
  */
-import { API_ORIGIN } from "./config.js";
+import { API_ORIGIN, ENABLE_SALE_OR_WEBSOCKET } from "./config.js";
 import {
   enqueueSyncOperation,
   generateUuidV4,
   rememberSaleUuidMapping,
+  refreshSaleOrNumbersNow,
 } from "./sync-queue.js";
 const SALES_API = `${API_ORIGIN}/api/sales`;
 const CUSTOMERS_API = `${API_ORIGIN}/api/customers`;
 const PRODUCTS_API = `${API_ORIGIN}/api/products`;
+const SALE_MAPPING_API = `${API_ORIGIN}/api/sync/sale-mapping`;
+const APPLY_MAPPING_API = `${API_ORIGIN}/api/sync/apply-sale-mapping`;
+const SALE_OR_WS_PATH = "/ws/sales-or";
+
+// WebSocket connection (used when central supports real-time OR updates)
+let saleOrSocket = null;
+let saleOrSocketReady = false;
+const saleOrWaiters = new Map();
+const saleOrPolls = new Map();
 
 function getToken() {
   return localStorage.getItem("sm_token");
@@ -52,6 +62,11 @@ function getTerminalPrefix() {
     }
   } catch (_) {}
   return "C01";
+}
+
+function looksLikeTempReceipt(receiptNo) {
+  const s = String(receiptNo || "").trim();
+  return /^C\d{2}-\d{8}-\d{6}-\d{6}$/i.test(s);
 }
 
 function nextReceiptSequence(todayKey) {
@@ -137,6 +152,27 @@ function validateAddress(raw) {
   const withoutSpaces = trimmed.replace(/\s/g, "");
   if (/^\d+$/.test(withoutSpaces)) {
     return { valid: false, message: "Address cannot be only numbers; enter a street, barangay, or full address." };
+  }
+  return { valid: true };
+}
+
+/** GCash: numeric only, max 14 chars. Maya (PayMaya): letters and numbers, max 14 chars. */
+function validatePaymentReference(paymentMethod, value) {
+  const trimmed = (value != null ? String(value) : "").trim();
+  if (trimmed.length > 14) {
+    return { valid: false, message: "Reference number must not be greater than 14 characters." };
+  }
+  if (paymentMethod === "gcash") {
+    if (!/^\d+$/.test(trimmed)) {
+      return { valid: false, message: "GCash reference must be numeric only (no letters or symbols)." };
+    }
+    return { valid: true };
+  }
+  if (paymentMethod === "paymaya") {
+    if (trimmed.length > 0 && !/^[A-Za-z0-9]+$/.test(trimmed)) {
+      return { valid: false, message: "Maya reference may include letters and numbers only." };
+    }
+    return { valid: true };
   }
   return { valid: true };
 }
@@ -772,13 +808,13 @@ document.addEventListener("click", (e) => {
     if (paymentMethod === "credit") {
       if (amountPaidInput) {
         amountPaidInput.value = "0";
-        amountPaidInput.readOnly = true;
+        amountPaidInput.readOnly = false; // user can edit for credit
         amountPaidInput.placeholder = "0";
       }
       if (amountReceivedInput) {
         amountReceivedInput.value = "0";
-        amountReceivedInput.readOnly = true;
-        amountReceivedInput.disabled = true;
+        amountReceivedInput.readOnly = true; // auto-filled from amount paid
+        amountReceivedInput.disabled = false;
       }
     } else {
       if (amountPaidInput) {
@@ -869,6 +905,15 @@ document.addEventListener("input", (e) => {
     if (amountFeedback) amountFeedback.textContent = "";
     updateSaleTotal();
     updateSaleChange();
+    if (e.target.id === "sale-amount-paid") {
+      const selectedPayment = document.querySelector(".sale-payment-option.selected");
+      if (selectedPayment && selectedPayment.dataset.payment === "credit") {
+        const amountReceivedInput = document.getElementById("sale-amount-received");
+        if (amountReceivedInput) {
+          amountReceivedInput.value = e.target.value || "0";
+        }
+      }
+    }
   }
   if (e.target.id === "sale-amount-received") {
     e.target.classList.remove("is-invalid");
@@ -878,6 +923,17 @@ document.addEventListener("input", (e) => {
   }
   if (e.target.id === "sale-payment-reference") {
     e.target.classList.remove("is-invalid");
+    const refErrorEl = document.getElementById("sale-payment-reference-error");
+    if (refErrorEl) refErrorEl.textContent = "";
+    const selected = document.querySelector(".sale-payment-option.selected");
+    const method = selected ? selected.dataset.payment : "";
+    if (method === "gcash") {
+      e.target.value = (e.target.value || "").replace(/\D/g, "").slice(0, 14);
+    } else if (method === "paymaya") {
+      e.target.value = (e.target.value || "").replace(/[^A-Za-z0-9]/g, "").slice(0, 14);
+    } else {
+      e.target.value = (e.target.value || "").slice(0, 14);
+    }
   }
 });
 
@@ -893,6 +949,13 @@ document.addEventListener("blur", (e) => {
   const rounded = roundToWholePeso(val);
   input.value = String(rounded);
   updateSaleTotal();
+  const selectedPayment = document.querySelector(".sale-payment-option.selected");
+  if (selectedPayment && selectedPayment.dataset.payment === "credit") {
+    const amountReceivedInput = document.getElementById("sale-amount-received");
+    if (amountReceivedInput) {
+      amountReceivedInput.value = String(rounded);
+    }
+  }
 });
 
 document.addEventListener("change", (e) => {
@@ -1128,7 +1191,7 @@ function submitSale() {
     amountPaidErrorBig.textContent = "";
   }
 
-  // Reference number required for GCash/PayMaya
+  // Reference number required and validated for GCash/PayMaya
   if (paymentMethod === "gcash" || paymentMethod === "paymaya") {
     if (!referenceNumber) {
       const alertEl = document.getElementById("sales-alert");
@@ -1138,6 +1201,19 @@ function submitSale() {
         alertEl.classList.remove("d-none");
       }
       if (referenceInput) referenceInput.classList.add("is-invalid");
+      return;
+    }
+    const refValidation = validatePaymentReference(paymentMethod, referenceNumber);
+    if (!refValidation.valid) {
+      const alertEl = document.getElementById("sales-alert");
+      if (alertEl) {
+        alertEl.textContent = refValidation.message;
+        alertEl.className = "alert alert-warning py-2 small";
+        alertEl.classList.remove("d-none");
+      }
+      if (referenceInput) referenceInput.classList.add("is-invalid");
+      const refErrorEl = document.getElementById("sale-payment-reference-error");
+      if (refErrorEl) refErrorEl.textContent = refValidation.message;
       return;
     }
   }
@@ -1292,10 +1368,21 @@ function submitSale() {
       ? Math.round((amountReceivedRaw - amountPaidRounded) * 100) / 100
       : null;
 
-  const remainingBalance = Math.max(0, totalRounded - amountPaidRounded);
+  // When customer gives less than the "amount to pay" field (e.g. field still at total),
+  // record the actual amount received as the payment so status stays partial, not paid.
+  let effectiveAmountPaid = amountPaidRounded;
+  if (
+    paymentMethod !== "credit" &&
+    amountReceivedRounded > 0 &&
+    amountReceivedRounded < amountPaidRounded
+  ) {
+    effectiveAmountPaid = amountReceivedRounded;
+  }
+
+  const remainingBalance = Math.max(0, totalRounded - effectiveAmountPaid);
   let status = "unpaid";
   if (remainingBalance <= 0) status = "paid";
-  else if (amountPaidRounded > 0 && remainingBalance > 0) status = "partial";
+  else if (effectiveAmountPaid > 0 && remainingBalance > 0) status = "partial";
 
   fetch(SALES_API, {
     method: "POST",
@@ -1311,11 +1398,10 @@ function submitSale() {
       transaction_type: "walk-in",
       items,
       payment_method: paymentMethod,
-      amount_paid: amountPaidRounded,
+      amount_paid: effectiveAmountPaid,
       amount_received: amountReceivedRaw || undefined,
       change_amount: changeFromReceived != null ? changeFromReceived : undefined,
       reference_number: referenceNumber || undefined,
-      // New sync-related identifiers (backend can store or ignore extras)
       sale_uuid: saleUuid,
       receipt_no: receiptNumber,
       receipt_number: receiptNumber,
@@ -1393,7 +1479,7 @@ function submitSale() {
             customer_address: addressTrimmedForPayload || undefined,
             transaction_type: "walk-in",
             total_amount: totalRounded,
-            amount_paid: amountPaidRounded,
+            amount_paid: effectiveAmountPaid,
             remaining_balance: remainingBalance,
             status,
             sale_date: saleData.sale_date || new Date().toISOString(),
@@ -1405,6 +1491,25 @@ function submitSale() {
       } catch (_) {
         // If queuing fails, we still keep the local sale; sync can be retried later.
       }
+
+      // If central is online and supports WebSockets, listen briefly for a real OR
+      // update for this sale and update the receipt in real time when it arrives.
+      try {
+        const tempReceipt =
+          saleData.receipt_no || saleData.receipt_number || receiptNumber;
+        if (tempReceipt && looksLikeTempReceipt(tempReceipt)) {
+          startSaleOrRealtimeWait({
+            saleUuid: saleData.sale_uuid || saleUuid,
+            tempReceipt,
+          });
+        }
+      } catch (_) {
+        // ignore websocket errors; HTTP-based mapping will still run below
+      }
+
+      // When central is online, try to immediately resolve C01 receipt_no
+      // into the central OR number for this client sale.
+      void refreshSaleOrNumbersNow();
 
       loadSales({});
       const alertEl = document.getElementById("sales-alert");
@@ -1428,14 +1533,203 @@ function submitSale() {
 const RECEIPT_COMPANY = {
   name: "D&M Sales Management",
   subtitle: "Construction Supplies",
-  address: "Business Address Here",
+  address: "Brgy. Basud (West) Sorsogon City, Sorsogon",
   tin: "TIN: 000-000-000-000",
-  contact: "Tel: (02) 1234-5678",
+  contact: "Tel: 0935 285 0681",
 };
 
-function showReceipt(sale, displayCustomerName, options = {}) {
-  const content = document.getElementById("receipt-content");
+function applyResolvedOrToReceipt(resolvedOrNumber, tempReceiptNo) {
+  const resolved = resolvedOrNumber != null ? String(resolvedOrNumber).trim() : "";
+  if (!resolved) return;
+
   const saleIdEl = document.getElementById("receipt-sale-id");
+  if (saleIdEl) saleIdEl.textContent = resolved;
+
+  const header = document.querySelector("#receipt-content .receipt-header");
+  if (header) {
+    let p = header.querySelector(".receipt-or");
+    if (!p) {
+      const title = header.querySelector(".receipt-title");
+      p = document.createElement("p");
+      p.className = "receipt-or";
+      if (title && title.parentNode === header) {
+        title.insertAdjacentElement("afterend", p);
+      } else {
+        header.appendChild(p);
+      }
+    }
+    p.innerHTML = `<strong>OR No.</strong> ${escapeHtml(resolved)}`;
+  }
+
+  const temp = tempReceiptNo != null ? String(tempReceiptNo).trim() : "";
+  if (!temp) return;
+
+  // Best-effort: persist mapping locally if the endpoint exists.
+  void fetch(APPLY_MAPPING_API, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ mappings: [{ receipt_no: temp, or_number: resolved }] }),
+  })
+    .then(() => {
+      try {
+        // Refresh sales list so the updated OR appears without needing another sale.
+        loadSales({});
+      } catch (_) {
+        // ignore UI refresh errors
+      }
+    })
+    .catch(() => {});
+}
+
+function connectSaleOrSocket() {
+  if (!ENABLE_SALE_OR_WEBSOCKET) return;
+  if (saleOrSocket || typeof WebSocket === "undefined") return;
+  try {
+    const urlBase = API_ORIGIN.replace(
+      /^http/i,
+      (m) => (m.toLowerCase() === "https" ? "wss" : "ws")
+    );
+    const ws = new WebSocket(urlBase + SALE_OR_WS_PATH);
+    saleOrSocket = ws;
+    ws.onopen = () => {
+      saleOrSocketReady = true;
+    };
+    const handleCloseOrError = () => {
+      saleOrSocketReady = false;
+      saleOrSocket = null;
+    };
+    ws.onclose = handleCloseOrError;
+    ws.onerror = handleCloseOrError;
+    ws.onmessage = (evt) => {
+      let msg;
+      try {
+        msg = JSON.parse(evt.data);
+      } catch (_) {
+        return;
+      }
+      if (!msg || msg.type !== "sale_or_resolved") return;
+      const key =
+        (msg.sale_uuid && String(msg.sale_uuid).trim()) ||
+        (msg.saleUuid && String(msg.saleUuid).trim()) ||
+        (msg.receipt_no && String(msg.receipt_no).trim());
+      if (!key) return;
+      const wait = saleOrWaiters.get(key);
+      if (!wait) return;
+      saleOrWaiters.delete(key);
+      if (wait.timeoutId) clearTimeout(wait.timeoutId);
+      const orNumber =
+        msg.or_number != null && String(msg.or_number).trim()
+          ? String(msg.or_number).trim()
+          : null;
+      if (!orNumber) return;
+      applyResolvedOrToReceipt(orNumber, wait.tempReceipt);
+    };
+  } catch (_) {
+    saleOrSocket = null;
+    saleOrSocketReady = false;
+  }
+}
+
+function startSaleOrRealtimeWait(opts) {
+  if (!ENABLE_SALE_OR_WEBSOCKET) return;
+  const tempReceipt = opts && opts.tempReceipt ? String(opts.tempReceipt).trim() : "";
+  const saleUuid =
+    opts && opts.saleUuid && String(opts.saleUuid).trim()
+      ? String(opts.saleUuid).trim()
+      : null;
+  if (!tempReceipt || !looksLikeTempReceipt(tempReceipt)) return;
+  const key = saleUuid || tempReceipt;
+  if (!key) return;
+
+  const existing = saleOrWaiters.get(key);
+  if (existing) return;
+
+  const timeoutMs = 30000;
+  const wait = {
+    tempReceipt,
+    saleUuid,
+    timeoutId: null,
+  };
+  wait.timeoutId = setTimeout(() => {
+    saleOrWaiters.delete(key);
+  }, timeoutMs);
+  saleOrWaiters.set(key, wait);
+
+  connectSaleOrSocket();
+  const sendSubscribe = () => {
+    if (!saleOrSocket) return;
+    try {
+      saleOrSocket.send(
+        JSON.stringify({
+          action: "subscribe_sale_or",
+          sale_uuid: saleUuid,
+          receipt_no: tempReceipt,
+        })
+      );
+    } catch (_) {}
+  };
+
+  if (saleOrSocketReady && saleOrSocket) {
+    sendSubscribe();
+  } else if (saleOrSocket) {
+    const ws = saleOrSocket;
+    const onOpen = () => {
+      ws.removeEventListener("open", onOpen);
+      saleOrSocketReady = true;
+      sendSubscribe();
+    };
+    ws.addEventListener("open", onOpen);
+  }
+}
+
+function startTempOrHttpPolling(tempReceipt) {
+  const temp = tempReceipt != null ? String(tempReceipt).trim() : "";
+  if (!temp || !looksLikeTempReceipt(temp)) return;
+  if (saleOrPolls.has(temp)) return;
+
+  const maxAttempts = 10;
+  const intervalMs = 3000;
+  let attempts = 0;
+
+  const poll = async () => {
+    attempts += 1;
+    try {
+      const res = await fetch(
+        `${SALE_MAPPING_API}?receipt_no=${encodeURIComponent(temp)}`,
+        { headers: authHeaders() }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        const mappings = Array.isArray(data?.mappings) ? data.mappings : [];
+        const m = mappings && mappings.length ? mappings[0] : null;
+        const resolved =
+          m?.or_number != null && String(m.or_number).trim()
+            ? String(m.or_number).trim()
+            : "";
+        if (resolved) {
+          applyResolvedOrToReceipt(resolved, temp);
+          saleOrPolls.delete(temp);
+          return;
+        }
+      }
+    } catch (_) {
+      // ignore and try again until maxAttempts
+    }
+
+    if (attempts < maxAttempts) {
+      const id = setTimeout(poll, intervalMs);
+      saleOrPolls.set(temp, id);
+    } else {
+      saleOrPolls.delete(temp);
+    }
+  };
+
+  const id = setTimeout(poll, intervalMs);
+  saleOrPolls.set(temp, id);
+}
+
+/** Build receipt HTML and sale id text for modal or right panel. */
+function buildReceiptHtml(sale, displayCustomerName, options = {}) {
   const customerName = sale.customer_name || displayCustomerName || "—";
   const paymentMethod = sale.payment_method || "cash";
   const paymentLabel = paymentMethod === "gcash" ? "GCash" : paymentMethod === "paymaya" ? "PayMaya" : paymentMethod === "credit" ? "Credit" : "Cash";
@@ -1443,7 +1737,7 @@ function showReceipt(sale, displayCustomerName, options = {}) {
     ? String(sale.reference_number).trim()
     : "";
   const orNumber = sale.or_number || sale.receipt_number || "";
-  if (saleIdEl) saleIdEl.textContent = orNumber || sale.id;
+  const saleIdText = orNumber || sale.id;
   const totalAmount = Number(sale.total_amount || 0);
   const amountPaid = Number(sale.amount_paid || 0);
   const balance = Number(sale.remaining_balance || 0);
@@ -1473,72 +1767,256 @@ function showReceipt(sale, displayCustomerName, options = {}) {
   const printedAt = new Date();
   const printedStr = printedAt.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 
-  if (content) {
-    const items = (sale.items || [])
-      .map(
-        (i) =>
-          `<tr><td class="receipt-desc">${escapeHtml(i.product_name || "")}</td><td class="text-end">${i.quantity}</td><td class="text-end receipt-currency">₱${Number(i.price || 0).toFixed(2)}</td><td class="text-end receipt-currency">₱${Number(i.subtotal || 0).toFixed(2)}</td></tr>`
-      )
-      .join("");
+  const items = (sale.items || [])
+    .map(
+      (i) =>
+        `<tr><td class="receipt-desc">${escapeHtml(i.product_name || "")}</td><td class="text-end">${i.quantity}</td><td class="text-end receipt-currency">₱${Number(i.price || 0).toFixed(2)}</td><td class="text-end receipt-currency">₱${Number(i.subtotal || 0).toFixed(2)}</td></tr>`
+    )
+    .join("");
 
-    content.innerHTML = `
-      <div class="receipt-print">
-        <header class="receipt-header">
-          <h1 class="receipt-company-name">${escapeHtml(RECEIPT_COMPANY.name)}</h1>
-          <p class="receipt-subtitle">${escapeHtml(RECEIPT_COMPANY.subtitle)}</p>
-          <p class="receipt-company-info">${escapeHtml(RECEIPT_COMPANY.address)}</p>
-          <p class="receipt-company-info">${escapeHtml(RECEIPT_COMPANY.tin)}</p>
-          <p class="receipt-company-info">${escapeHtml(RECEIPT_COMPANY.contact)}</p>
-          <hr class="receipt-hr" />
-          <h2 class="receipt-title">OFFICIAL RECEIPT</h2>
-          ${orNumber ? `<p class="receipt-or"><strong>OR No.</strong> ${escapeHtml(orNumber)}</p>` : ""}
-        </header>
+  const html = `
+    <div class="receipt-print">
+      <header class="receipt-header">
+        <h1 class="receipt-company-name">${escapeHtml(RECEIPT_COMPANY.name)}</h1>
+        <p class="receipt-subtitle">${escapeHtml(RECEIPT_COMPANY.subtitle)}</p>
+        <p class="receipt-company-info">${escapeHtml(RECEIPT_COMPANY.address)}</p>
+        <p class="receipt-company-info">${escapeHtml(RECEIPT_COMPANY.tin)}</p>
+        <p class="receipt-company-info">${escapeHtml(RECEIPT_COMPANY.contact)}</p>
+        <hr class="receipt-hr" />
+        <h2 class="receipt-title">OFFICIAL RECEIPT</h2>
+        ${orNumber ? `<p class="receipt-or"><strong>OR No.</strong> ${escapeHtml(orNumber)}</p>` : ""}
+      </header>
 
-        <div class="receipt-meta">
-          <p><strong>Sale #</strong> ${sale.id} &nbsp;&nbsp; <strong>Date:</strong> ${sale.sale_date ? new Date(sale.sale_date).toLocaleString() : ""}</p>
-          <p><strong>Customer:</strong> ${escapeHtml(customerName)}</p>
-          <p><strong>Payment:</strong> ${escapeHtml(paymentLabel)}${referenceNumber ? ` &nbsp;&nbsp; <strong>Ref:</strong> ${escapeHtml(referenceNumber)}` : ""}</p>
-        </div>
+      <div class="receipt-meta">
+        <p><strong>Sale #</strong> ${sale.id} &nbsp;&nbsp; <strong>Date:</strong> ${sale.sale_date ? new Date(sale.sale_date).toLocaleString() : ""}</p>
+        <p><strong>Customer:</strong> ${escapeHtml(customerName)}</p>
+        <p><strong>Payment:</strong> ${escapeHtml(paymentLabel)}${referenceNumber ? ` &nbsp;&nbsp; <strong>Ref:</strong> ${escapeHtml(referenceNumber)}` : ""}</p>
+      </div>
 
-        <table class="receipt-table">
-          <thead><tr><th>Description</th><th class="text-end">Qty</th><th class="text-end">Unit Price</th><th class="text-end">Amount</th></tr></thead>
-          <tbody>${items}</tbody>
-        </table>
+      <table class="receipt-table">
+        <thead><tr><th>Description</th><th class="text-end">Qty</th><th class="text-end">Unit Price</th><th class="text-end">Amount</th></tr></thead>
+        <tbody>${items}</tbody>
+      </table>
 
-        <div class="receipt-totals">
-          <div class="receipt-totals-row"><span>Subtotal (VAT Inclusive)</span><span class="receipt-currency">₱${totalAmount.toFixed(2)}</span></div>
-          <hr class="receipt-totals-hr" />
-          <div class="receipt-totals-row receipt-totals-grand"><span>TOTAL</span><span class="receipt-currency">₱${totalAmount.toFixed(2)}</span></div>
-          <hr class="receipt-totals-hr" />
-          ${
-            amountReceived != null
-              ? `<div class="receipt-totals-row"><span>Amount Received</span><span class="receipt-currency">₱${amountReceived.toFixed(
-                  2
-                )}</span></div>`
-              : ""
-          }
-          <div class="receipt-totals-row"><span>Amount Paid</span><span class="receipt-currency">₱${amountPaid.toFixed(2)}</span></div>
-          ${changeAmount != null ? `<div class="receipt-totals-row"><span>Change</span><span class="receipt-currency">₱${changeAmount.toFixed(2)}</span></div>` : ""}
-          ${balance > 0 ? `<div class="receipt-totals-row"><span>Balance</span><span class="receipt-currency">₱${balance.toFixed(2)}</span></div>` : ""}
-        </div>
+      <div class="receipt-totals">
+        <div class="receipt-totals-row"><span>Subtotal (VAT Inclusive)</span><span class="receipt-currency">₱${totalAmount.toFixed(2)}</span></div>
+        <hr class="receipt-totals-hr" />
+        <div class="receipt-totals-row receipt-totals-grand"><span>TOTAL</span><span class="receipt-currency">₱${totalAmount.toFixed(2)}</span></div>
+        <hr class="receipt-totals-hr" />
+        ${
+          amountReceived != null
+            ? `<div class="receipt-totals-row"><span>Amount Received</span><span class="receipt-currency">₱${amountReceived.toFixed(2)}</span></div>`
+            : ""
+        }
+        <div class="receipt-totals-row"><span>Amount Paid</span><span class="receipt-currency">₱${amountPaid.toFixed(2)}</span></div>
+        ${changeAmount != null ? `<div class="receipt-totals-row"><span>Change</span><span class="receipt-currency">₱${changeAmount.toFixed(2)}</span></div>` : ""}
+        ${balance > 0 ? `<div class="receipt-totals-row"><span>Balance</span><span class="receipt-currency">₱${balance.toFixed(2)}</span></div>` : ""}
+      </div>
 
-        <footer class="receipt-footer">
-          <p class="receipt-served">Served by: ${escapeHtml(servedBy)}</p>
-          <p class="receipt-printed">Printed: ${escapeHtml(printedStr)}</p>
-          <p class="receipt-thanks">Thank you for your purchase!</p>
-          <p class="receipt-disclaimer">This receipt serves as proof of purchase.</p>
-        </footer>
-      </div>`;
+      <footer class="receipt-footer">
+        <p class="receipt-served">Served by: ${escapeHtml(servedBy)}</p>
+        <p class="receipt-printed">Printed: ${escapeHtml(printedStr)}</p>
+        <p class="receipt-thanks">Thank you for your purchase!</p>
+        <p class="receipt-disclaimer">This receipt serves as proof of purchase.</p>
+      </footer>
+    </div>`;
+  return { html, saleIdText, orNumber };
+}
+
+function showReceipt(sale, displayCustomerName, options = {}) {
+  const { html, saleIdText, orNumber } = buildReceiptHtml(sale, displayCustomerName, options);
+  const content = document.getElementById("receipt-content");
+  const saleIdEl = document.getElementById("receipt-sale-id");
+  if (saleIdEl) saleIdEl.textContent = saleIdText;
+  if (content) content.innerHTML = html;
+
+  // If we only have a local/temporary receipt number (e.g. C01-20260311-...),
+  // try to resolve the real OR number from central and update the receipt UI.
+  try {
+    const temp = String(orNumber || "").trim();
+    if (temp && looksLikeTempReceipt(temp)) {
+      void (async () => {
+        try {
+          const res = await fetch(
+            `${SALE_MAPPING_API}?receipt_no=${encodeURIComponent(temp)}`,
+            { headers: authHeaders() }
+          );
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) return;
+          const mappings = Array.isArray(data?.mappings) ? data.mappings : [];
+          const m = mappings && mappings.length ? mappings[0] : null;
+          const resolved =
+            m?.or_number != null && String(m.or_number).trim()
+              ? String(m.or_number).trim()
+              : "";
+          if (!resolved) return;
+          applyResolvedOrToReceipt(resolved, temp);
+        } catch (_) {
+          // ignore
+        }
+      })();
+      // If central takes a bit of time to assign an OR, keep polling
+      // for a short window so the UI updates without needing another sale.
+      startTempOrHttpPolling(temp);
+    }
+  } catch (_) {
+    // ignore
   }
 
   const receiptModal = document.getElementById("receiptModal");
   if (receiptModal) {
-    const m = new bootstrap.Modal(receiptModal);
+    const m = bootstrap.Modal.getOrCreateInstance(receiptModal);
     m.show();
   }
   const printBtn = document.getElementById("btn-print-receipt");
   if (printBtn) {
-    printBtn.onclick = () => printReceiptInNewWindow();
+    printBtn.onclick = () => {
+      const receiptEl = document.querySelector("#receipt-content .receipt-print");
+      if (receiptEl) {
+        printReceiptInNewWindowFromElement(receiptEl);
+      } else {
+        printReceiptInNewWindow();
+      }
+    };
+  }
+}
+
+/** Show receipt in the left panel (used when opening from Sales table receipt icon + Preview). */
+function showReceiptInRightPanel(sale, displayCustomerName, options = {}) {
+  const { html, saleIdText } = buildReceiptHtml(sale, displayCustomerName, options);
+  const content = document.getElementById("receipt-preview-content");
+  const saleIdEl = document.getElementById("receipt-preview-sale-id");
+  if (saleIdEl) saleIdEl.textContent = saleIdText;
+  if (content) content.innerHTML = html;
+
+  const panel = document.getElementById("receipt-preview-panel");
+  if (panel) {
+    panel.setAttribute("aria-hidden", "false");
+  }
+
+  setReceiptPreviewEyeIcon(true);
+
+  const printBtn = document.getElementById("btn-print-receipt-panel");
+  if (printBtn) {
+    printBtn.onclick = () => {
+      const receiptEl = document.querySelector("#receipt-preview-content .receipt-print");
+      if (receiptEl) printReceiptInNewWindowFromElement(receiptEl);
+    };
+  }
+}
+
+function setReceiptPreviewEyeIcon(isOpen) {
+  const btn = document.getElementById("btn-preview-latest-receipt-panel");
+  const icon = document.getElementById("receipt-preview-eye-icon") || (btn && btn.querySelector(".receipt-preview-eye-icon"));
+  const headerEye = document.getElementById("receipt-preview-header-eye-icon");
+  if (btn) {
+    btn.setAttribute("data-preview-state", isOpen ? "open" : "closed");
+  }
+  if (icon) {
+    icon.classList.remove("bi-eye", "bi-eye-fill", "bi-eye-slash");
+    icon.classList.add(isOpen ? "bi-eye-fill" : "bi-eye-slash");
+    icon.setAttribute("aria-label", isOpen ? "Receipt preview open" : "Receipt preview closed");
+  }
+  if (headerEye) {
+    headerEye.classList.remove("bi-eye", "bi-eye-fill", "bi-eye-slash");
+    headerEye.classList.add(isOpen ? "bi-eye-fill" : "bi-eye-slash");
+    headerEye.setAttribute("aria-label", isOpen ? "Receipt preview open" : "Receipt preview closed");
+  }
+}
+
+function printReceiptInNewWindowFromElement(receiptEl) {
+  if (!receiptEl) {
+    window.print();
+    return;
+  }
+  const html = receiptEl.innerHTML;
+  const printDoc = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Receipt – Print preview</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 0; font-family: system-ui, sans-serif; font-size: 12px; color: #1a1a1a; background: #e9ecef; }
+    .preview-toolbar { background: #495057; color: #fff; padding: 10px 16px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+    .preview-toolbar h2 { margin: 0; font-size: 1rem; font-weight: 600; }
+    .preview-toolbar .hint { font-size: 0.8rem; opacity: 0.9; }
+    .preview-toolbar .actions { display: flex; gap: 8px; }
+    .preview-toolbar button { padding: 6px 14px; border: none; border-radius: 4px; cursor: pointer; font-size: 0.9rem; font-weight: 500; }
+    .preview-toolbar .btn-print { background: #0d6efd; color: #fff; }
+    .preview-toolbar .btn-print:hover { background: #0b5ed7; }
+    .preview-toolbar .btn-close { background: #6c757d; color: #fff; }
+    .preview-toolbar .btn-close:hover { background: #5c636a; }
+    .preview-page { background: #fff; margin: 16px auto; box-shadow: 0 2px 8px rgba(0,0,0,0.15); max-width: 210mm; }
+    .receipt-print { max-width: 105mm; margin: 0 auto; padding: 8mm 10mm; }
+    .receipt-header { text-align: center; margin-bottom: 10px; }
+    .receipt-company-name { font-size: 1.25rem; font-weight: 700; margin: 0 0 2px 0; }
+    .receipt-subtitle { font-size: 0.85rem; color: #555; margin: 0 0 4px 0; }
+    .receipt-company-info { font-size: 0.8rem; color: #444; margin: 2px 0; }
+    .receipt-hr { border: 0; border-top: 1px solid #ccc; margin: 6px auto; width: 80%; }
+    .receipt-title { font-size: 1rem; font-weight: 700; margin: 2px 0; }
+    .receipt-or { font-size: 0.9rem; margin: 2px 0 0 0; }
+    .receipt-meta { margin-bottom: 8px; font-size: 0.85rem; }
+    .receipt-meta p { margin: 2px 0; }
+    .receipt-table { width: 100%; border-collapse: collapse; margin-bottom: 8px; font-size: 0.85rem; }
+    .receipt-table th, .receipt-table td { padding: 3px 4px; border-bottom: 1px solid #e0e0e0; }
+    .receipt-table th { text-align: left; font-weight: 600; background: #f8f9fa; }
+    .receipt-table th.text-end, .receipt-table td.text-end { text-align: right; }
+    .receipt-currency { white-space: nowrap; }
+    .receipt-totals { margin: 6px 0 10px 0; font-size: 0.9rem; }
+    .receipt-totals-row { display: flex; justify-content: space-between; padding: 2px 0; }
+    .receipt-totals-row.receipt-totals-grand { font-size: 1rem; font-weight: 700; padding: 4px 0; }
+    .receipt-totals-hr { border: 0; border-top: 1px dashed #999; margin: 2px 0; }
+    .receipt-footer { margin-top: 10px; padding-top: 6px; border-top: 1px solid #ccc; font-size: 0.8rem; color: #555; text-align: center; }
+    .receipt-footer p { margin: 2px 0; }
+    .receipt-thanks { font-weight: 600; color: #1a1a1a; }
+    .receipt-disclaimer { font-size: 0.7rem; color: #777; margin-top: 4px; }
+    @media print {
+      .preview-toolbar { display: none !important; }
+      body { background: #fff; -webkit-print-color-adjust: exact; print-color-adjust: exact; margin: 0; padding: 0; }
+      .preview-page { box-shadow: none; margin: 0; padding: 0; }
+      .receipt-print { margin: 0; padding: 3mm 5mm; }
+      @page { size: A4; margin: 3mm; }
+    }
+  </style>
+</head>
+<body>
+  <div class="preview-toolbar">
+    <div>
+      <h2>Receipt – Print preview</h2>
+      <span class="hint">Use the Print button below or Ctrl+P to print.</span>
+    </div>
+    <div class="actions">
+      <button type="button" class="btn-print" id="preview-print-btn">Print</button>
+      <button type="button" class="btn-close" id="preview-close-btn">Close</button>
+    </div>
+  </div>
+  <div class="preview-page">
+    <div class="receipt-print">${html}</div>
+  </div>
+  <script>
+    (function() {
+      function doPrint() {
+        if (window.opener && window.opener.electronAPI && typeof window.opener.electronAPI.printReceiptToPdf === "function") {
+          window.opener.postMessage({ type: "print-receipt-to-pdf", html: document.documentElement.outerHTML }, "*");
+        } else {
+          window.print();
+        }
+      }
+      window.onafterprint = function() { window.close(); };
+      document.getElementById("preview-print-btn").onclick = doPrint;
+      document.getElementById("preview-close-btn").onclick = function() { window.close(); };
+    })();
+  <\/script>
+</body>
+</html>`;
+  const w = window.open("", "_blank");
+  if (w) {
+    w.document.write(printDoc);
+    w.document.close();
+  } else {
+    window.print();
   }
 }
 
@@ -1578,6 +2056,241 @@ async function openReceiptForSale(saleId) {
       alertEl.classList.remove("d-none");
     }
   }
+}
+
+// ----- Receipt & Payment history modal (from Sales table) -----
+let receiptHistoryPaymentsCache = null;
+const receiptHistorySnapshots = new Map(); // key: saleId string -> array of snapshots
+/** When a payment row's preview is showing in the left panel: { saleId, paymentIndex }. Used to show eye-open vs eye-closed icon. */
+let activeReceiptSnapshot = null;
+
+async function loadAllPaymentsForHistory() {
+  try {
+    const res = await fetch(`${SALES_API}/payments`, { headers: authHeaders() });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.message || "Failed to load payments for history.");
+    }
+    const list = Array.isArray(data.payments) ? data.payments : [];
+    receiptHistoryPaymentsCache = list;
+    return list;
+  } catch (err) {
+    console.error("Failed to load payments for receipt history:", err);
+    throw err;
+  }
+}
+
+function buildPaymentSnapshotsForSale(sale) {
+  const saleId = sale?.id;
+  if (!saleId) return [];
+  const totalAmount = Number(sale.total_amount || 0);
+  const payments =
+    (receiptHistoryPaymentsCache || []).filter((p) => Number(p.sale_id) === Number(saleId)) || [];
+  if (!payments.length) return [];
+
+  const sorted = payments
+    .slice()
+    .sort((a, b) => new Date(a.payment_date || 0) - new Date(b.payment_date || 0));
+
+  let cumulative = 0;
+  const snapshots = sorted.map((p, idx) => {
+    const amountThis = Number(p.amount_paid || 0);
+    cumulative += amountThis;
+    const remaining = Math.max(0, totalAmount - cumulative);
+    const label = idx === 0 ? "Payment 1 (initial)" : `Payment ${idx + 1}`;
+    const dateDisplay = p.payment_date
+      ? String(p.payment_date).replace("T", " ").slice(0, 19)
+      : "—";
+    return {
+      index: idx,
+      label,
+      date: dateDisplay,
+      amountThis,
+      cumulativePaid: cumulative,
+      remaining,
+      method: p.payment_method || "—",
+      ref: p.reference_number || "—",
+    };
+  });
+
+  return snapshots;
+}
+
+function buildReceiptHistoryHtml(sale) {
+  const saleId = sale?.id;
+  if (!saleId) {
+    return '<p class="text-danger small mb-0">Sale not found.</p>';
+  }
+
+  const snapshots = buildPaymentSnapshotsForSale(sale);
+  receiptHistorySnapshots.set(String(saleId), snapshots);
+
+  if (!snapshots.length) {
+    return '<p class="text-muted small mb-0">No payments recorded for this sale yet.</p>';
+  }
+
+  const header = `
+    <p class="small text-muted mb-2">
+      This sale has ${snapshots.length} payment${snapshots.length === 1 ? "" : "s"}.
+      Click Preview to see the receipt as of each payment.
+    </p>
+    <div class="table-responsive">
+      <table class="table table-sm align-middle mb-0">
+        <thead>
+          <tr>
+            <th>Payment</th>
+            <th>Date</th>
+            <th class="text-end">Amount</th>
+            <th>Method</th>
+            <th>Reference</th>
+            <th class="text-end">Preview</th>
+          </tr>
+        </thead>
+        <tbody>`;
+
+  const isActive = (s) =>
+    activeReceiptSnapshot &&
+    String(activeReceiptSnapshot.saleId) === String(sale.id) &&
+    activeReceiptSnapshot.paymentIndex === s.index;
+  const body = snapshots
+    .map(
+      (snap) => {
+        const open = isActive(snap);
+        return `
+          <tr>
+            <td>${escapeHtml(snap.label)}</td>
+            <td>${escapeHtml(snap.date || "—")}</td>
+            <td class="text-end">₱${snap.amountThis.toFixed(2)}</td>
+            <td>${escapeHtml(String(snap.method || "—"))}</td>
+            <td>${escapeHtml(String(snap.ref || "—"))}</td>
+            <td class="text-end">
+              <button type="button"
+                class="btn btn-outline-secondary btn-sm receipt-preview-eye-btn"
+                data-action="preview-receipt-snapshot"
+                data-sale-id="${sale.id}"
+                data-payment-index="${snap.index}"
+                title="${open ? "Receipt preview open (click to keep)" : "Preview receipt as of this payment"}">
+                <i class="bi receipt-preview-row-icon ${open ? "bi-eye-fill" : "bi-eye"}"></i>
+              </button>
+            </td>
+          </tr>`;
+      }
+    )
+    .join("");
+
+  const footer = `
+        </tbody>
+      </table>
+    </div>`;
+
+  return header + body + footer;
+}
+
+async function openReceiptHistoryForSale(saleId) {
+  if (!saleId) return;
+  const sale = allSales.find((s) => String(s.id) === String(saleId));
+  const leftPanel = document.getElementById("receipt-history-panel");
+  const bodyEl = document.getElementById("receipt-history-body-panel");
+  const saleIdEl = document.getElementById("receipt-history-sale-id-panel");
+  const previewBtn = document.getElementById("btn-preview-latest-receipt-panel");
+  if (!leftPanel || !bodyEl || !saleIdEl || !previewBtn) return;
+
+  saleIdEl.textContent = sale
+    ? (sale.or_number || sale.receipt_number || `#${sale.id}`)
+    : `#${saleId}`;
+  bodyEl.innerHTML = '<span class="text-muted small">Loading history…</span>';
+
+  leftPanel.setAttribute("aria-hidden", "false");
+  setReceiptPreviewEyeIcon(false);
+  activeReceiptSnapshot = null;
+
+  previewBtn.onclick = async () => {
+    setReceiptPreviewEyeIcon(true);
+    try {
+      const res = await fetch(`${SALES_API}/${encodeURIComponent(saleId)}`, { headers: authHeaders() });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !(data.sale || data)) {
+        setReceiptPreviewEyeIcon(false);
+        const alertEl = document.getElementById("sales-alert");
+        if (alertEl) {
+          alertEl.textContent = (data && data.message) || "Failed to load sale for receipt.";
+          alertEl.className = "alert alert-danger py-2 small";
+          alertEl.classList.remove("d-none");
+        }
+        return;
+      }
+      const saleData = data.sale || data;
+      showReceiptInRightPanel(saleData, saleData.customer_name || "");
+    } catch (err) {
+      setReceiptPreviewEyeIcon(false);
+      const alertEl = document.getElementById("sales-alert");
+      if (alertEl) {
+        alertEl.textContent = err.message || "Failed to load sale for receipt.";
+        alertEl.className = "alert alert-danger py-2 small";
+        alertEl.classList.remove("d-none");
+      }
+    }
+  };
+
+  try {
+    await loadAllPaymentsForHistory();
+    bodyEl.innerHTML = buildReceiptHistoryHtml(sale || { id: saleId });
+  } catch (err) {
+    bodyEl.innerHTML = `<p class="text-danger small mb-0">${
+      escapeHtml(err.message || "Failed to load receipt history.")
+    }</p>`;
+  }
+}
+
+function previewReceiptSnapshot(saleId, paymentIndex) {
+  if (!saleId || paymentIndex == null || Number.isNaN(paymentIndex)) return;
+  const sale = allSales.find((s) => String(s.id) === String(saleId));
+  if (!sale) {
+    openReceiptForSale(saleId);
+    return;
+  }
+  const key = String(saleId);
+  let snapshots = receiptHistorySnapshots.get(key);
+  if (!snapshots || !snapshots.length) {
+    snapshots = buildPaymentSnapshotsForSale(sale);
+    receiptHistorySnapshots.set(key, snapshots);
+  }
+  const snap = snapshots.find((s) => s.index === paymentIndex);
+  if (!snap) {
+    openReceiptForSale(saleId);
+    return;
+  }
+
+  const snapshotSale = {
+    ...sale,
+    amount_paid: snap.cumulativePaid,
+    remaining_balance: snap.remaining,
+  };
+  const customerName = snapshotSale.customer_name || "";
+  showReceiptInRightPanel(snapshotSale, customerName, {
+    amountReceived: snap.amountThis,
+  });
+  activeReceiptSnapshot = { saleId: Number(saleId), paymentIndex };
+  updateReceiptHistoryPreviewIcons();
+}
+
+/** Update Preview column icons: eye = closed, eye-fill = this row's receipt is shown. */
+function updateReceiptHistoryPreviewIcons() {
+  const panel = document.getElementById("receipt-history-body-panel");
+  if (!panel) return;
+  panel.querySelectorAll("button[data-action='preview-receipt-snapshot'][data-sale-id][data-payment-index]").forEach((btn) => {
+    const icon = btn.querySelector(".receipt-preview-row-icon");
+    if (!icon) return;
+    const sid = btn.getAttribute("data-sale-id");
+    const idx = parseInt(btn.getAttribute("data-payment-index") || "-1", 10);
+    const isOpen =
+      activeReceiptSnapshot &&
+      String(activeReceiptSnapshot.saleId) === String(sid) &&
+      activeReceiptSnapshot.paymentIndex === idx;
+    icon.classList.remove("bi-eye", "bi-eye-fill");
+    icon.classList.add(isOpen ? "bi-eye-fill" : "bi-eye");
+    btn.setAttribute("title", isOpen ? "Receipt preview open (click to keep)" : "Preview receipt as of this payment");
+  });
 }
 
 // Expose receipt opener globally so other pages (e.g. Payments) can reuse it.
@@ -1637,9 +2350,10 @@ function printReceiptInNewWindow() {
     .receipt-disclaimer { font-size: 0.7rem; color: #777; margin-top: 4px; }
     @media print {
       .preview-toolbar { display: none !important; }
-      body { background: #fff; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-      .preview-page { box-shadow: none; margin: 0; }
-      @page { size: A4; margin: 10mm; }
+      body { background: #fff; -webkit-print-color-adjust: exact; print-color-adjust: exact; margin: 0; padding: 0; }
+      .preview-page { box-shadow: none; margin: 0; padding: 0; }
+      .receipt-print { margin: 0; padding: 3mm 5mm; }
+      @page { size: A4; margin: 3mm; }
     }
   </style>
 </head>
@@ -1660,7 +2374,11 @@ function printReceiptInNewWindow() {
   <script>
     (function() {
       function doPrint() {
-        window.print();
+        if (window.opener && window.opener.electronAPI && typeof window.opener.electronAPI.printReceiptToPdf === "function") {
+          window.opener.postMessage({ type: "print-receipt-to-pdf", html: document.documentElement.outerHTML }, "*");
+        } else {
+          window.print();
+        }
       }
       function doClose() {
         window.close();
@@ -1705,8 +2423,10 @@ function loadSales(opts = {}) {
 
   const tbody = document.getElementById("sales-tbody");
   if (!tbody) {
-    console.warn("Sales tbody not found, retrying...");
-    setTimeout(() => loadSales(opts), 100);
+    if (document.body?.dataset?.page === "sales") {
+      console.warn("Sales tbody not found, retrying...");
+      setTimeout(() => loadSales(opts), 100);
+    }
     return;
   }
   
@@ -1774,6 +2494,16 @@ function loadSales(opts = {}) {
           loadMoreEl.classList.add("d-none");
         }
       }
+      // Keep view at top after initial load so refresh doesn’t leave content “moved up”
+      if (!append) {
+        requestAnimationFrame(() => {
+          window.scrollTo(0, 0);
+          if (document.documentElement) document.documentElement.scrollTop = 0;
+          if (document.body) document.body.scrollTop = 0;
+          var m = document.querySelector(".app-main");
+          if (m) m.scrollTop = 0;
+        });
+      }
     })
     .catch((err) => {
       salesLoading = false;
@@ -1800,6 +2530,19 @@ function renderSales(sales) {
 
   tbody.innerHTML = orderedSales
     .map((s) => {
+      const totalAmount = Number(s.total_amount || 0);
+      const amountPaid = Number(s.amount_paid || 0);
+      const remaining = Number(s.remaining_balance || 0);
+      const issueResolution = (s.issue_resolution_status || "").toLowerCase();
+      let viewStatus = (s.status || "").toLowerCase();
+      if (remaining > 0 && amountPaid > 0) {
+        viewStatus = "partial";
+      } else if (remaining > 0 && amountPaid <= 0) {
+        viewStatus = "unpaid";
+      } else if (remaining <= 0 && amountPaid >= totalAmount) {
+        viewStatus = "paid";
+      }
+
       const transactionType = s.transaction_type || "";
       const transactionTypeBadge =
         transactionType === "walk-in"
@@ -1808,12 +2551,23 @@ function renderSales(sales) {
           ? '<span class="badge bg-primary me-1">Online</span>'
           : "";
 
+      // Voided/refunded take precedence in badge; otherwise show payment status
       const statusBadgeClass =
-        s.status === "paid"
+        issueResolution === "voided"
+          ? "secondary"
+          : issueResolution === "refunded"
+          ? "secondary"
+          : viewStatus === "paid"
           ? "success"
-          : s.status === "partial"
+          : viewStatus === "partial"
           ? "warning"
           : "secondary";
+      const statusLabel =
+        issueResolution === "voided"
+          ? "Voided"
+          : issueResolution === "refunded"
+          ? "Refunded"
+          : viewStatus || "";
 
       const issueState = s.issueState || (s.has_open_issue ? "open" : "none");
       let flagColorClass = "text-secondary";
@@ -1851,14 +2605,15 @@ function renderSales(sales) {
         .filter(Boolean)
         .join(" ");
 
-      const saleNoDisplay = (s.or_number || s.receipt_number || s.id);
+      /* Sale # column shows numeric id to match receipt "Sale #"; OR No. is separate on receipt */
+      const saleNoDisplay = s.id;
       return `<tr${rowClasses ? ` class="${rowClasses}"` : ""} ${rowAttrs}>
           <td>${escapeHtml(String(saleNoDisplay))}</td>
           <td>${transactionTypeBadge}${escapeHtml(s.customer_name || "—")}</td>
-          <td>₱${Number(s.total_amount || 0).toFixed(2)}</td>
-          <td>₱${Number(s.amount_paid || 0).toFixed(2)}</td>
-          <td>₱${Number(s.remaining_balance || 0).toFixed(2)}</td>
-          <td><span class="badge bg-${statusBadgeClass}">${escapeHtml(s.status || "")}</span></td>
+          <td>₱${totalAmount.toFixed(2)}</td>
+          <td>₱${amountPaid.toFixed(2)}</td>
+          <td>₱${remaining.toFixed(2)}</td>
+          <td><span class="badge bg-${statusBadgeClass}">${escapeHtml(statusLabel || viewStatus || "")}</span></td>
           <td>${s.sale_date ? new Date(s.sale_date).toLocaleDateString() : ""}</td>
           <td class="text-end">
             <div class="d-inline-flex align-items-center">
@@ -2007,13 +2762,36 @@ async function submitFlagIssue() {
 }
 
 document.addEventListener("click", (e) => {
+  const panelClose = e.target.closest(".receipt-panel-close[data-panel]");
+  if (panelClose) {
+    const panel = panelClose.getAttribute("data-panel");
+    if (panel === "left") {
+      const el = document.getElementById("receipt-preview-panel");
+      if (el) el.setAttribute("aria-hidden", "true");
+      setReceiptPreviewEyeIcon(false);
+    } else if (panel === "right") {
+      const el = document.getElementById("receipt-history-panel");
+      if (el) el.setAttribute("aria-hidden", "true");
+    }
+    return;
+  }
   const reprintBtn = e.target.closest(
     "button[data-action='reprint-receipt'][data-sale-id]"
   );
   if (reprintBtn) {
     const saleId = reprintBtn.getAttribute("data-sale-id");
     if (saleId) {
-      openReceiptForSale(saleId);
+      openReceiptHistoryForSale(saleId);
+    }
+  }
+  const snapshotBtn = e.target.closest(
+    "button[data-action='preview-receipt-snapshot'][data-sale-id][data-payment-index]"
+  );
+  if (snapshotBtn) {
+    const saleId = snapshotBtn.getAttribute("data-sale-id");
+    const idx = parseInt(snapshotBtn.getAttribute("data-payment-index") || "-1", 10);
+    if (saleId && idx >= 0) {
+      previewReceiptSnapshot(Number(saleId), idx);
     }
   }
   const flagBtn = e.target.closest("button[data-action='flag-sale'][data-sale-id]");
@@ -2400,11 +3178,69 @@ function maybeOpenIssueFromQuery() {
   }
 }
 
+function maybeOpenReceiptFromQuery() {
+  try {
+    const params = new URLSearchParams(window.location.search || "");
+    const saleIdParam = params.get("openReceiptSaleId");
+    if (!saleIdParam) return;
+    const saleIdNum = Number(saleIdParam) || parseInt(saleIdParam, 10) || null;
+    if (!saleIdNum) return;
+
+    setTimeout(async () => {
+      try {
+        // First open the receipt history panel for this sale so we can
+        // build payment snapshots that reflect each repayment.
+        await openReceiptHistoryForSale(saleIdNum);
+
+        // Try to preview the latest snapshot (last payment) so the receipt
+        // shows the up-to-date Amount Paid and Remaining Balance.
+        const key = String(saleIdNum);
+        let snapshots = receiptHistorySnapshots.get(key);
+        if (!snapshots || !snapshots.length) {
+          snapshots = buildPaymentSnapshotsForSale(
+            allSales.find((s) => String(s.id) === key) || { id: saleIdNum }
+          );
+          receiptHistorySnapshots.set(key, snapshots);
+        }
+
+        if (snapshots && snapshots.length) {
+          const last = snapshots[snapshots.length - 1];
+          previewReceiptSnapshot(saleIdNum, last.index);
+        } else {
+          // Fallback: open the standard receipt view if no payments found.
+          openReceiptForSale(saleIdNum);
+        }
+      } catch {
+        // On any error, fall back to the regular receipt so the user
+        // still sees something usable.
+        openReceiptForSale(saleIdNum);
+      }
+    }, 300);
+  } catch {
+    // Ignore query parsing errors
+  }
+}
+
 if (document.readyState === "loading") {
-  window.addEventListener("DOMContentLoaded", maybeOpenIssueFromQuery);
+  window.addEventListener("DOMContentLoaded", () => {
+    maybeOpenIssueFromQuery();
+    maybeOpenReceiptFromQuery();
+  });
 } else {
   maybeOpenIssueFromQuery();
+  maybeOpenReceiptFromQuery();
 }
+
+// In Electron: when the print preview window clicks Print, it posts here; we generate PDF and open in viewer.
+window.addEventListener("message", (event) => {
+  if (event.data && event.data.type === "print-receipt-to-pdf" && typeof event.data.html === "string") {
+    if (window.electronAPI && typeof window.electronAPI.printReceiptToPdf === "function") {
+      window.electronAPI.printReceiptToPdf(event.data.html).catch((err) => {
+        console.error("Print to PDF failed:", err);
+      });
+    }
+  }
+});
 
 // Confirm before closing the receipt modal so cashiers don't accidentally lose it
 document.addEventListener("hide.bs.modal", (event) => {

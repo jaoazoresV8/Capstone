@@ -1,4 +1,4 @@
-// Very simple in-memory rate limiter for development/LAN use.
+
 // Limits requests per IP + path within a window.
 
 const buckets = new Map();

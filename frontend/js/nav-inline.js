@@ -122,6 +122,7 @@
     '        <button type="button" class="btn-close btn-close-sm" data-bs-dismiss="modal" aria-label="Close"></button>' +
     '      </div>' +
     '      <div class="modal-body small">' +
+    '        <div id="app-settings-alert" class="alert alert-success py-1 small d-none" role="alert"></div>' +
     '        <div class="mb-2 text-muted">Central sync configuration for this device.</div>' +
     '        <div class="mb-3">' +
     '          <label for="settings-client-id" class="form-label small mb-1 text-muted">Client ID</label>' +
@@ -165,4 +166,15 @@
 
   var el = document.getElementById("app-nav");
   if (el) el.innerHTML = html;
+
+  // Prevent "UI moves up" on browser refresh: set scroll behavior as early as possible
+  // (before main content parses) so the browser never restores or shows wrong scroll.
+  try {
+    if (typeof history !== "undefined" && history.scrollRestoration) {
+      history.scrollRestoration = "manual";
+    }
+    if (typeof window !== "undefined") window.scrollTo(0, 0);
+    if (document.documentElement) document.documentElement.scrollTop = 0;
+    if (document.body) document.body.scrollTop = 0;
+  } catch (_) {}
 })();

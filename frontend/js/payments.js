@@ -70,6 +70,27 @@ function getRefDisplay(paymentMethod, referenceNumber) {
   return ref || "—";
 }
 
+/** GCash: numeric only, max 14 chars. Maya (PayMaya): letters and numbers, max 14 chars. */
+function validatePaymentReference(paymentMethod, value) {
+  const trimmed = (value != null ? String(value) : "").trim();
+  if (trimmed.length > 14) {
+    return { valid: false, message: "Reference number must not be greater than 14 characters." };
+  }
+  if (paymentMethod === "gcash") {
+    if (!/^\d+$/.test(trimmed)) {
+      return { valid: false, message: "GCash reference must be numeric only (no letters or symbols)." };
+    }
+    return { valid: true };
+  }
+  if (paymentMethod === "paymaya") {
+    if (trimmed.length > 0 && !/^[A-Za-z0-9]+$/.test(trimmed)) {
+      return { valid: false, message: "Maya reference may include letters and numbers only." };
+    }
+    return { valid: true };
+  }
+  return { valid: true };
+}
+
 let allPayments = [];
 
 function renderPaymentsRows(payments) {
@@ -189,18 +210,48 @@ document.addEventListener("click", function (e) {
   const detailsBtn = e.target.closest("[data-action='open-payment-details'][data-sale-id]");
   if (detailsBtn) {
     e.preventDefault();
-    const saleId = Number(detailsBtn.getAttribute("data-sale-id") || "0");
+    const saleIdAttr = detailsBtn.getAttribute("data-sale-id") || "";
+    const saleId = Number(saleIdAttr) || parseInt(saleIdAttr, 10) || null;
     if (!saleId) return;
     const modalEl = document.getElementById("paymentDetailsModal");
     const bodyEl = document.getElementById("payment-details-body");
     const titleEl = document.getElementById("paymentDetailsModalLabel");
+    const previewBtn = document.getElementById("payment-details-preview-receipt");
     if (!modalEl || !bodyEl || !titleEl) return;
 
-    titleEl.textContent = "Payment details for Sale #" + saleId;
+    titleEl.textContent = "Payment details for Sale #" + saleIdAttr;
     bodyEl.innerHTML = buildSalePaymentDetailsHtml(saleId);
+
+    if (previewBtn) {
+      previewBtn.dataset.saleId = String(saleIdAttr);
+      previewBtn.disabled =
+        typeof window.openReceiptForSale !== "function" &&
+        typeof window.dispatchEvent !== "function";
+    }
 
     const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
     modal.show();
+    return;
+  }
+  const previewReceiptBtn = e.target.closest("#payment-details-preview-receipt");
+  if (previewReceiptBtn) {
+    e.preventDefault();
+    const saleIdAttr = previewReceiptBtn.dataset.saleId || "";
+    const saleId = Number(saleIdAttr) || parseInt(saleIdAttr, 10) || null;
+    if (!saleId) return;
+    try {
+      if (typeof window.openReceiptForSale === "function") {
+        window.openReceiptForSale(saleId);
+      } else if (typeof window.dispatchEvent === "function") {
+        window.dispatchEvent(
+          new CustomEvent("app:open-receipt", {
+            detail: { saleId },
+          })
+        );
+      }
+    } catch {
+      // best-effort; ignore failures
+    }
     return;
   }
   if (e.target.closest("#btn-payments-search")) {
@@ -327,6 +378,22 @@ function resetRecordPaymentModalState() {
   if (changeWrap) changeWrap.classList.add("d-none");
 }
 
+document.addEventListener("input", function (e) {
+  if (e.target.id !== "record-payment-reference") return;
+  e.target.classList.remove("is-invalid");
+  const refError = document.getElementById("record-payment-reference-error");
+  if (refError) refError.textContent = "";
+  const selected = document.querySelector(".record-payment-option.selected");
+  const method = selected ? selected.dataset.payment : "";
+  if (method === "gcash") {
+    e.target.value = (e.target.value || "").replace(/\D/g, "").slice(0, 14);
+  } else if (method === "paymaya") {
+    e.target.value = (e.target.value || "").replace(/[^A-Za-z0-9]/g, "").slice(0, 14);
+  } else {
+    e.target.value = (e.target.value || "").slice(0, 14);
+  }
+});
+
 document.addEventListener("click", function (e) {
   const opt = e.target.closest(".record-payment-option[data-payment]");
   if (opt && !opt.disabled) {
@@ -363,7 +430,9 @@ document.addEventListener("click", function (e) {
   const referenceInput = document.getElementById("record-payment-reference");
   const referenceNumber = referenceInput ? (referenceInput.value || "").trim() : "";
   const amountInput = document.getElementById("record-payment-amount");
-  const amount = amountInput ? (parseFloat(amountInput.value) || 0) : 0;
+  const receivedInput = document.getElementById("record-payment-received");
+  const amountRaw = amountInput ? parseFloat(amountInput.value) || 0 : 0;
+  const receivedRaw = receivedInput ? parseFloat(receivedInput.value) || 0 : 0;
 
   if (!saleIdToUse) {
     alert("Missing sale. Please use the Pay button from the Customers page.");
@@ -381,14 +450,36 @@ document.addEventListener("click", function (e) {
       if (refError) refError.textContent = "Please enter the reference number.";
       return;
     }
+    const refValidation = validatePaymentReference(paymentMethod, referenceNumber);
+    if (!refValidation.valid) {
+      if (referenceInput) referenceInput.classList.add("is-invalid");
+      const refError = document.getElementById("record-payment-reference-error");
+      if (refError) refError.textContent = refValidation.message;
+      return;
+    }
   }
-  if (amount <= 0) {
+  // Determine how much to actually record as payment.
+  // Default: use the "Amount to pay" field.
+  let effectiveAmount = amountRaw;
+
+  // If the user left "Amount to pay" at the full balance but typed a smaller
+  // positive value in "Amount received", treat that smaller value as the
+  // partial payment. This matches the cashier expectation when repaying.
+  if (
+    receivedRaw > 0 &&
+    receivedRaw < amountRaw &&
+    Math.abs(amountRaw - balanceNum) < 0.01
+  ) {
+    effectiveAmount = receivedRaw;
+  }
+
+  if (effectiveAmount <= 0) {
     if (amountInput) amountInput.classList.add("is-invalid");
     const errEl = document.getElementById("record-payment-amount-error");
     if (errEl) errEl.textContent = "Please enter the amount to pay.";
     return;
   }
-  var amountRounded = Math.round(amount * 100) / 100;
+  var amountRounded = Math.round(effectiveAmount * 100) / 100;
   var balanceRounded = Math.round(balanceNum * 100) / 100;
   if (amountRounded > balanceRounded) {
     if (amountInput) amountInput.classList.add("is-invalid");
@@ -425,20 +516,16 @@ document.addEventListener("click", function (e) {
       loadPayments();
       alert("Payment recorded successfully.");
 
-      // After recording a payment from Customers → Payments flow, open receipt
-      // so cashier can immediately review / print it.
+      // After recording a payment from Customers → Payments flow, always
+      // redirect to the Sales page and auto-open both the receipt history
+      // and the latest receipt for this sale via query params.
       try {
-        if (typeof window.openReceiptForSale === "function") {
-          window.openReceiptForSale(saleIdToUse);
-        } else if (typeof window.dispatchEvent === "function") {
-          window.dispatchEvent(
-            new CustomEvent("app:open-receipt", {
-              detail: { saleId: saleIdToUse },
-            })
-          );
-        }
+        const url = new URL("./sales.html", window.location.href);
+        url.searchParams.set("openReceiptSaleId", String(saleIdToUse));
+        window.location.href = url.toString();
       } catch (_) {
-        // Non-fatal: receipt flow is best-effort.
+        // Non-fatal: if redirect fails, the payment is still recorded and
+        // will appear in the sale's receipt history when opening Sales.
       }
 
       // Queue payment sync operation so central can update balances.

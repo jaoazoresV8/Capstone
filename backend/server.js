@@ -115,8 +115,17 @@ app.use(express.json());
 // Idempotency for all write endpoints (POST/PUT/PATCH/DELETE under /api)
 app.use(createIdempotencyMiddleware(pool));
 
-// Reports always go directly to MongoDB (no central proxy), so mount before proxy.
-app.use("/api/reports", reportRouter);
+// Reports endpoint:
+// Default: read directly from MongoDB via reportRouter on both central and clients.
+// Optional: if you explicitly set REPORTS_USE_CENTRAL="1", the client can proxy
+//           /api/reports/* to the central server to reuse its analytics workload.
+const centralUrlEnv = (process.env.CENTRAL_API_URL || "").trim();
+const reportsUseCentral = (process.env.REPORTS_USE_CENTRAL || "").trim() === "1";
+if (centralUrlEnv && reportsUseCentral) {
+  app.use("/api/reports", createCentralProxy({ target: centralUrlEnv }));
+} else {
+  app.use("/api/reports", reportRouter);
+}
 
 // Simple sync/central status endpoint for frontend navbar indicator
 app.get("/api/client-sync-status", async (req, res) => {
@@ -465,6 +474,12 @@ app.post("/api/sync/apply-sale-mapping", authenticateToken, async (req, res) => 
 
     let updated = 0;
     for (const m of mappings) {
+      if (m.receipt_no === m.or_number) continue;
+      const [existing] = await pool.query(
+        "SELECT sale_id FROM sales WHERE or_number = ? LIMIT 1",
+        [m.or_number]
+      );
+      if (existing && existing.length > 0) continue;
       const [result] = await pool.query(
         "UPDATE sales SET or_number = ? WHERE or_number = ?",
         [m.or_number, m.receipt_no]
@@ -728,14 +743,15 @@ async function applyCentralChangeToLocal(change, payload) {
       }
       case "settings": {
         const pct = data.markup_percent != null ? parseFloat(data.markup_percent) : NaN;
-        if (isNaN(pct) || pct < 0 || pct > 999) break;
+        if (isNaN(pct) || pct < 0 || pct >= 100) break;
         const val = String(Math.round(pct * 100) / 100);
         await pool.query(
           "INSERT INTO settings (setting_key, setting_value) VALUES ('markup_percent', ?) ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value",
           [val]
         );
+        // Margin-based: Selling Price = Cost / (1 - Margin). Stored as markup_percent but used as margin.
         await pool.query(
-          "UPDATE products SET selling_price = ROUND(supplier_price * (1 + ? / 100), 2)",
+          "UPDATE products SET selling_price = ROUND(supplier_price / (1 - ? / 100), 2)",
           [pct]
         );
         break;
@@ -821,9 +837,13 @@ async function applyCentralChangeToLocal(change, payload) {
             : null;
         const paymentMethodRaw = data.payment_method;
         const paymentReferenceRaw = data.reference_number;
+        const payloadRoot = payload && typeof payload === "object" ? payload : {};
+        const orNumberRaw =
+          data.or_number ?? data.or_no ?? data.receipt_no ?? data.receipt_number ?? data.orNumber ?? data.orNo
+          ?? payloadRoot.or_number ?? payloadRoot.or_no ?? payloadRoot.receipt_no ?? payloadRoot.receipt_number ?? payloadRoot.orNumber ?? payloadRoot.orNo ?? null;
         const orNumber =
-          data.or_number != null && String(data.or_number).trim()
-            ? String(data.or_number).trim()
+          orNumberRaw != null && String(orNumberRaw).trim()
+            ? String(orNumberRaw).trim()
             : null;
         const totalAmount = Number(data.total_amount) || 0;
         const amountPaid = Number(data.amount_paid) || 0;
@@ -866,12 +886,22 @@ async function applyCentralChangeToLocal(change, payload) {
           );
         }
 
+        let orNumberToUse = orNumber;
+        if (orNumberToUse) {
+          const [existingOr] = await pool.query(
+            "SELECT sale_id FROM sales WHERE or_number = ? AND sale_id != ? LIMIT 1",
+            [orNumberToUse, saleId]
+          );
+          if (existingOr && existingOr.length > 0) orNumberToUse = null;
+        }
         await pool.query(
           `INSERT INTO sales (
              sale_id,
              customer_id,
              transaction_type,
              customer_name,
+             customer_contact,
+             customer_address,
              or_number,
              total_amount,
              amount_paid,
@@ -879,11 +909,13 @@ async function applyCentralChangeToLocal(change, payload) {
              status,
              sale_date
            )
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now','localtime')))
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now','localtime')))
            ON CONFLICT(sale_id) DO UPDATE SET
              customer_id = excluded.customer_id,
              transaction_type = excluded.transaction_type,
              customer_name = excluded.customer_name,
+             customer_contact = excluded.customer_contact,
+             customer_address = excluded.customer_address,
              or_number = excluded.or_number,
              total_amount = excluded.total_amount,
              amount_paid = excluded.amount_paid,
@@ -895,7 +927,9 @@ async function applyCentralChangeToLocal(change, payload) {
             customerId,
             transactionType,
             customerName,
-            orNumber,
+            customerContact,
+            customerAddress,
+            orNumberToUse,
             totalAmount,
             amountPaid,
             remainingBalance,
@@ -958,6 +992,38 @@ async function applyCentralChangeToLocal(change, payload) {
           }
         } catch (e) {
           console.error("[CentralSync] failed to reconcile payments for sale", saleId, e?.message || e);
+        }
+
+        // If we still don't have an OR number (payload didn't include it), fetch the sale from central so we display OR-004 etc. instead of sale_id.
+        if (!orNumberToUse) {
+          try {
+            const centralUrl = await getCentralBaseUrl();
+            if (centralUrl) {
+              const res = await fetch(
+                `${centralUrl.replace(/\/+$/, "")}/api/sales/${encodeURIComponent(String(saleId))}`,
+                { headers: { Accept: "application/json" } }
+              );
+              if (res && res.ok) {
+                const centralSale = await res.json().catch(() => null);
+                const saleData = centralSale && centralSale.sale ? centralSale.sale : centralSale;
+                const centralOrRaw =
+                  saleData && (saleData.or_number ?? saleData.or_no ?? saleData.receipt_no ?? saleData.receipt_number ?? saleData.orNumber ?? saleData.orNo);
+                const centralOr =
+                  centralOrRaw != null && String(centralOrRaw).trim() ? String(centralOrRaw).trim() : null;
+                if (centralOr) {
+                  const [taken] = await pool.query(
+                    "SELECT sale_id FROM sales WHERE or_number = ? AND sale_id != ? LIMIT 1",
+                    [centralOr, saleId]
+                  );
+                  if (!taken || taken.length === 0) {
+                    await pool.query("UPDATE sales SET or_number = ? WHERE sale_id = ?", [centralOr, saleId]);
+                  }
+                }
+              }
+            }
+          } catch (e) {
+            // Non-fatal: sale is already applied, we just couldn't get the OR number from central
+          }
         }
         break;
       }
@@ -1086,10 +1152,16 @@ function startCentralPullWorker() {
             : null;
           if (Number.isFinite(saleId) && centralOr) {
             try {
-              await pool.query(
-                "UPDATE sales SET or_number = ? WHERE sale_id = ?",
+              const [taken] = await pool.query(
+                "SELECT sale_id FROM sales WHERE or_number = ? AND sale_id != ? LIMIT 1",
                 [centralOr, saleId]
               );
+              if (!taken || taken.length === 0) {
+                await pool.query(
+                  "UPDATE sales SET or_number = ? WHERE sale_id = ?",
+                  [centralOr, saleId]
+                );
+              }
             } catch (_) {}
           }
           continue;

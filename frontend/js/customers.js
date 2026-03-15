@@ -40,8 +40,6 @@ function isAdmin() {
 
 async function updateCustomerBasicInfo() {
   if (!currentCustomerDetails) return;
-  const id = currentCustomerDetails.customer_id || currentCustomerDetails.id;
-  if (!id) return;
   const nameInput = document.getElementById("customer-detail-name");
   const contactInput = document.getElementById("customer-detail-contact");
   const addressInput = document.getElementById("customer-detail-address");
@@ -57,16 +55,20 @@ async function updateCustomerBasicInfo() {
     }
     return;
   }
+  const id = currentCustomerDetails.customer_id ?? currentCustomerDetails.id;
+  const isNewOrSalesOnly = id == null || id === "";
   try {
-    const res = await fetch(`${CUSTOMERS_API}/${id}`, {
-      method: "PUT",
+    const url = isNewOrSalesOnly ? CUSTOMERS_API : `${CUSTOMERS_API}/${id}`;
+    const method = isNewOrSalesOnly ? "POST" : "PUT";
+    const res = await fetch(url, {
+      method,
       headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify({ name, contact, address }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       if (msgEl) {
-        msgEl.textContent = data.message || "Failed to update customer.";
+        msgEl.textContent = data.message || "Failed to save customer.";
         msgEl.className = "small mt-1 text-danger";
         msgEl.classList.remove("d-none");
       }
@@ -75,16 +77,19 @@ async function updateCustomerBasicInfo() {
     currentCustomerDetails.name = name;
     currentCustomerDetails.contact = contact;
     currentCustomerDetails.address = address;
+    if (data.customer && (data.customer.id != null || data.customer.customer_id != null)) {
+      currentCustomerDetails.id = data.customer.id ?? data.customer.customer_id;
+      currentCustomerDetails.customer_id = currentCustomerDetails.id;
+    }
     if (msgEl) {
-      msgEl.textContent = "Customer information updated.";
+      msgEl.textContent = isNewOrSalesOnly ? "Customer saved. Contact and address will show in the list." : "Customer information updated.";
       msgEl.className = "small mt-1 text-success";
       msgEl.classList.remove("d-none");
     }
-    // Refresh list best-effort
     loadCustomers({ ...getCustomersParams() });
   } catch (err) {
     if (msgEl) {
-      msgEl.textContent = err.message || "Failed to update customer.";
+      msgEl.textContent = err.message || "Failed to save customer.";
       msgEl.className = "small mt-1 text-danger";
       msgEl.classList.remove("d-none");
     }
@@ -290,7 +295,7 @@ function buildDetailsHtml(c) {
 
   if (hasTransactions) {
     html += '<div class="detail-section">';
-    html += '<div class="detail-section-title">Transaction history</div>';
+    html += '<div class="detail-section-title">Transaction history (most recent first)</div>';
     transactions.forEach((t) => {
       const dateStr = t.sale_date ? new Date(t.sale_date).toLocaleDateString(undefined, { dateStyle: "short" }) : "—";
       const rawStatus = (t.status || "").toLowerCase();
@@ -463,12 +468,15 @@ function renderCustomers(customers) {
         const payParams = new URLSearchParams({ pay: "1", customerId: String(c.customer_id || c.id || ""), customerName: (c.name || "").trim(), balance: String(saleBalance) });
         if (saleId) payParams.set("saleId", String(saleId));
         const detailsBtn = hasDetails
-          ? `<button type="button" class="btn btn-outline-secondary btn-sm me-1" data-action="view-customer-details" data-index="${i}"><i class="bi bi-eye"></i> Details</button>`
+          ? `<button type="button" class="btn btn-outline-secondary btn-sm" data-action="view-customer-details" data-index="${i}"><i class="bi bi-eye"></i> Details</button>`
           : "";
         const payBtn = hasBalance(c)
           ? `<a href="./payments.html?${payParams.toString()}" class="btn btn-danger btn-sm" data-action="pay-customer" title="Record payment">Pay</a>`
           : "";
-        const actions = `${detailsBtn}${payBtn}`;
+        const actions =
+          detailsBtn || payBtn
+            ? `<div class="d-inline-flex gap-1 justify-content-end">${detailsBtn}${payBtn}</div>`
+            : "";
         return `<tr data-customer-row data-index="${i}" class="${rowClass}">
           <td>${escapeHtml(c.name || "—")}</td>
           <td>${escapeHtml(c.contact || "—")}</td>

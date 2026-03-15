@@ -466,6 +466,9 @@ function initUsersPage() {
 if (document.body) {
   document.body.classList.remove("auth-pending");
   document.body.classList.remove("page-loading");
+  window.scrollTo(0, 0);
+  var m = document.querySelector(".app-main");
+  if (m) m.scrollTop = 0;
 }
 
 // Initial load (direct visit)

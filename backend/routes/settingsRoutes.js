@@ -42,20 +42,21 @@ router.put("/", authenticateToken, requireAdmin, async (req, res) => {
 
     if (markup_percent != null) {
       const pct = parseFloat(markup_percent);
-      if (isNaN(pct) || pct < 0 || pct > 999) {
-        return res.status(400).json({ message: "Markup percentage must be between 0 and 999." });
+      if (isNaN(pct) || pct < 0 || pct >= 100) {
+        return res.status(400).json({ message: "Margin percentage must be between 0 and 99.99 (profit margin)." });
       }
       const value = String(Math.round(pct * 100) / 100);
-      const markupNum = parseFloat(value);
+      const marginNum = parseFloat(value);
       await pool.query(
         "INSERT OR REPLACE INTO settings (setting_key, setting_value) VALUES ('markup_percent', ?)",
         [value]
       );
+      // Margin-based: Selling Price = Cost / (1 - Margin). Stored as markup_percent but used as margin.
       await pool.query(
-        "UPDATE products SET selling_price = ROUND(supplier_price * (1 + ? / 100), 2)",
-        [markupNum]
+        "UPDATE products SET selling_price = ROUND(supplier_price / (1 - ? / 100), 2)",
+        [marginNum]
       );
-      updates.markup_percent = markupNum;
+      updates.markup_percent = marginNum;
     }
 
     if (client_id != null) {

@@ -336,6 +336,12 @@ async function reconcileLocalSaleOrNumbers() {
   }
 }
 
+// Public helper: force a best-effort refresh of local OR numbers
+// from central mappings (used immediately after creating a sale).
+export async function refreshSaleOrNumbersNow() {
+  await reconcileLocalSaleOrNumbers();
+}
+
 // Best-effort automatic flushing:
 // - shortly after page load
 // - whenever the browser regains connectivity

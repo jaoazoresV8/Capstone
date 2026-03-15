@@ -107,9 +107,10 @@
             }, 50);
           }
           if (push !== false) history.pushState({ pjax: true, url: url, page: page }, "", url);
-          // Hard reset scroll so navbar is fully visible (avoid sticky jump)
+          // Reset scroll (window + fixed .app-main) so navbar is fully visible
           if (document.documentElement) document.documentElement.scrollTop = 0;
           if (document.body) document.body.scrollTop = 0;
+          if (main) main.scrollTop = 0;
         }
       })
       .catch(function () { window.location.href = url; });
@@ -152,9 +153,40 @@
     ensureViewToggle();
   }
 
+  // Treat browser refresh same as nav refresh: reset scroll to top (window + fixed .app-main).
+  function applyRefreshScrollBehavior() {
+    try {
+      if (typeof history !== "undefined" && history.scrollRestoration) {
+        history.scrollRestoration = "manual";
+      }
+      window.scrollTo(0, 0);
+      if (document.documentElement) document.documentElement.scrollTop = 0;
+      if (document.body) document.body.scrollTop = 0;
+      var main = document.querySelector(".app-main");
+      if (main) main.scrollTop = 0;
+    } catch (_) {}
+  }
+
+  window.addEventListener("pageshow", function (e) {
+    if (e.persisted) applyRefreshScrollBehavior();
+  });
+
+  // Disable browser refresh via keyboard (F5, Ctrl+R, Cmd+R)
+  window.addEventListener("keydown", function (e) {
+    if (e.key === "F5" || ((e.ctrlKey || e.metaKey) && e.key === "r")) {
+      e.preventDefault();
+    }
+  });
+
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", ensureGlobalScripts);
+    document.addEventListener("DOMContentLoaded", function () {
+      ensureGlobalScripts();
+      applyRefreshScrollBehavior();
+      requestAnimationFrame(applyRefreshScrollBehavior);
+    });
   } else {
     ensureGlobalScripts();
+    applyRefreshScrollBehavior();
+    requestAnimationFrame(applyRefreshScrollBehavior);
   }
 })();

@@ -1,14 +1,15 @@
 
-import { app as electronApp, BrowserWindow, dialog, shell } from "electron";
+import { app as electronApp, BrowserWindow, dialog, shell, ipcMain } from "electron";
 import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const preloadPath = path.join(__dirname, "preload.js");
 
 
-electronApp.commandLine.appendSwitch("enable-print-preview");
-
+// Do not enable Chromium print preview; it shows "This app doesn't support print preview" on Windows.
+// The receipt is already shown in the app's own print preview window before Print is clicked.
 const PORT = process.env.PORT || 5000;
 const APP_PROTOCOL = "dmsales";
 const DASHBOARD_PATH = "/pages/dashboard.html";
@@ -115,6 +116,48 @@ function registerDeepLinkProtocol() {
   }
 }
 
+/** Generate a PDF from receipt HTML and open it in the default viewer (avoids broken native print preview in Electron). */
+async function printReceiptToPdf(fullPrintDocHtml) {
+  const win = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+    },
+  });
+  try {
+    await win.loadURL("about:blank");
+    await win.webContents.executeJavaScript(
+      `document.open();document.write(${JSON.stringify(fullPrintDocHtml)});document.close();`
+    );
+    await new Promise((r) => setTimeout(r, 150));
+    const pdfBuffer = await win.webContents.printToPDF({
+      printBackground: true,
+      margins: { marginType: "default" },
+    });
+    const tempDir = electronApp.getPath("temp");
+    const pdfPath = path.join(tempDir, `receipt-${Date.now()}.pdf`);
+    fs.writeFileSync(pdfPath, pdfBuffer);
+    shell.openPath(pdfPath);
+    return { success: true, path: pdfPath };
+  } finally {
+    win.destroy();
+  }
+}
+
+ipcMain.handle("print-receipt-to-pdf", async (_event, fullPrintDocHtml) => {
+  if (typeof fullPrintDocHtml !== "string") {
+    throw new Error("Invalid receipt HTML");
+  }
+  return printReceiptToPdf(fullPrintDocHtml);
+});
+
+ipcMain.handle("open-external", (_event, url) => {
+  if (typeof url === "string" && (url.startsWith("http://") || url.startsWith("https://"))) {
+    shell.openExternal(url);
+  }
+});
+
 function createWindow() {
   try {
     log("Creating main window...");
@@ -126,8 +169,9 @@ function createWindow() {
       webPreferences: {
         nodeIntegration: false,
         contextIsolation: true,
+        preload: preloadPath,
       },
-      show: false, 
+      show: false,
     });
 
     
@@ -152,8 +196,16 @@ function createWindow() {
 
     mainWindow.loadURL(`http://localhost:${PORT}`);
 
-    // Open external links (e.g. target="_blank") in the user's default browser
+    // Open external links in the default browser; allow blank/same-origin windows (e.g. print preview)
     mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+      const isBlankOrSameOrigin =
+        !url ||
+        url === "about:blank" ||
+        url.startsWith("http://localhost:") ||
+        url.startsWith("https://localhost:");
+      if (isBlankOrSameOrigin) {
+        return { action: "allow" };
+      }
       shell.openExternal(url);
       return { action: "deny" };
     });

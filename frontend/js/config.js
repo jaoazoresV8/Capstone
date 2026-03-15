@@ -22,3 +22,8 @@ function computeApiOrigin() {
 
 export const API_ORIGIN = computeApiOrigin();
 
+// Feature flag: enable real-time OR WebSocket integration with central.
+// - false (default): never open ws://.../ws/sales-or, avoids console errors if backend WS is missing.
+// - true: frontend will connect to /ws/sales-or and listen for sale_or_resolved messages.
+export const ENABLE_SALE_OR_WEBSOCKET = false;
+

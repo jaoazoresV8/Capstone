@@ -1,4 +1,3 @@
-
 (function () {
   var DESKTOP_MIN_WIDTH = 768;
   var dragState = null;
@@ -8,6 +7,23 @@
 
   function isDesktop() {
     return window.matchMedia("(min-width: " + DESKTOP_MIN_WIDTH + "px)").matches;
+  }
+
+  /** Remove any leftover modal backdrop/state so inputs and links are never stuck. */
+  function forceModalCleanup() {
+    document.body.classList.remove("modal-dragging", "modal-open");
+    document.querySelectorAll(".modal-backdrop").forEach(function (el) {
+      if (el && el.parentNode) el.parentNode.removeChild(el);
+    });
+    if (rafId !== null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+    pendingX = null;
+    pendingY = null;
+    dragState = null;
+    document.removeEventListener("mousemove", onMouseMove);
+    document.removeEventListener("mouseup", onMouseUp);
   }
 
   function getModalDialog(modalEl) {
@@ -119,6 +135,17 @@
 
   document.addEventListener("hidden.bs.modal", function (e) {
     resetPosition(e.target);
+    forceModalCleanup();
+    // Run again after Bootstrap's backdrop transition so no leftover overlay blocks clicks
+    setTimeout(forceModalCleanup, 150);
+  });
+
+  window.addEventListener("pjax:complete", function () {
+    forceModalCleanup();
+  });
+
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible") forceModalCleanup();
   });
 
   document.addEventListener("DOMContentLoaded", function () {
