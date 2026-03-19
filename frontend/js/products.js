@@ -1,5 +1,6 @@
 import { API_ORIGIN } from "./config.js";
 const PRODUCTS_API = `${API_ORIGIN}/api/products`;
+const PRODUCTS_REORDER_EMAIL_API = (id) => `${PRODUCTS_API}/${encodeURIComponent(id)}/reorder-email`;
 const SUPPLIERS_API = `${API_ORIGIN}/api/suppliers`;
 const SETTINGS_API = `${API_ORIGIN}/api/settings`;
 
@@ -226,6 +227,9 @@ function appendProductRows(products) {
   const fragment = visibleProducts
     .map((p) => {
       const hasSupplier = p.supplier_id != null;
+      const reorderBtn = hasSupplier
+        ? `<button type="button" class="btn btn-outline-warning btn-sm" data-action="reorder-product" data-product-id="${p.id}" title="Reorder via email to supplier"><i class="bi bi-arrow-repeat"></i></button>`
+        : "";
       const supplierCell = hasSupplier
         ? `<span class="d-inline-flex align-items-center gap-1">
              <span>${escapeHtml(p.supplier_name || "—")}</span>
@@ -244,6 +248,7 @@ function appendProductRows(products) {
           <button type="button" class="btn btn-link btn-sm p-0 text-secondary me-1" data-action="show-record-info" data-product-id="${p.id}" title="When &amp; who recorded">
             <i class="bi bi-clock-history"></i>
           </button>
+          ${reorderBtn}
           <button type="button" class="btn btn-outline-primary btn-sm" data-action="edit-product" data-product-id="${p.id}" title="Edit Product">
             <i class="bi bi-pencil-square"></i>
           </button>
@@ -281,6 +286,9 @@ function renderProducts(products) {
       (p) => {
         const supplierName = p.supplier_name || "—";
         const hasSupplier = p.supplier_id != null;
+        const reorderBtn = hasSupplier
+          ? `<button type="button" class="btn btn-outline-warning btn-sm" data-action="reorder-product" data-product-id="${p.id}" title="Reorder via email to supplier"><i class="bi bi-arrow-repeat"></i></button>`
+          : "";
         const supplierCell = hasSupplier
           ? `<span class="d-inline-flex align-items-center gap-1">
                <span>${escapeHtml(p.supplier_name || "—")}</span>
@@ -299,6 +307,7 @@ function renderProducts(products) {
             <button type="button" class="btn btn-link btn-sm p-0 text-secondary me-1" data-action="show-record-info" data-product-id="${p.id}" title="When &amp; who recorded">
               <i class="bi bi-clock-history"></i>
             </button>
+            ${reorderBtn}
             <button type="button" class="btn btn-outline-primary btn-sm" data-action="edit-product" data-product-id="${p.id}" title="Edit Product">
               <i class="bi bi-pencil-square"></i>
             </button>
@@ -438,6 +447,144 @@ function normalizePhoneInput(val) {
 
 function isPhoneValid(val) {
   return /^09\d{9}$/.test(val);
+}
+
+function openExternalUrl(url) {
+  if (!url) return;
+  try {
+    if (window.electronAPI && typeof window.electronAPI.openExternal === "function") {
+      window.electronAPI.openExternal(url);
+      return;
+    }
+  } catch {}
+  try {
+    // In regular browsers, prefer same-tab navigation to avoid popup blockers
+    // (especially when URL is opened after async supplier lookup).
+    window.location.assign(url);
+  } catch {}
+}
+
+function toWhatsAppPhoneDigitsPhilippines(phone09) {
+  const digits = String(phone09 || "").replace(/\D/g, "");
+  if (/^09\d{9}$/.test(digits)) return `63${digits.slice(1)}`;
+  if (/^9\d{9}$/.test(digits)) return `63${digits}`;
+  if (/^63\d{10}$/.test(digits)) return digits;
+  return "";
+}
+
+function openWhatsAppOnce({ phone09, text }) {
+  const phoneLocal = normalizePhoneInput(String(phone09 || ""));
+  if (!isPhoneValid(phoneLocal)) return false;
+  const digits = toWhatsAppPhoneDigitsPhilippines(phoneLocal);
+  if (!digits) return false;
+  const msg = String(text || "").trim();
+  const protoUrl = `whatsapp://send?phone=${digits}${msg ? `&text=${encodeURIComponent(msg)}` : ""}`;
+  const apiUrl = `https://api.whatsapp.com/send?phone=${digits}${msg ? `&text=${encodeURIComponent(msg)}` : ""}`;
+  const isElectron = !!(window.electronAPI && typeof window.electronAPI.openExternal === "function");
+  openExternalUrl(isElectron ? protoUrl : apiUrl);
+  return true;
+}
+
+function isTemporarilyUnavailableContact(contact) {
+  const s = String(contact || "").trim();
+  if (!s) return true;
+  const lower = s.toLowerCase();
+  if (lower === "no." || lower === "no" || lower === "n/a" || lower === "na" || lower === "none" || lower === "-") return true;
+  return false;
+}
+
+function isValidEmailContact(contact) {
+  if (isTemporarilyUnavailableContact(contact)) return false;
+  const s = String(contact || "").trim();
+  return s.includes("@");
+}
+
+function defaultReorderEmailText({ productName, stockQuantity }) {
+  const product = productName || "the requested product";
+  const stock = stockQuantity != null ? String(stockQuantity) : "0";
+  return (
+    `Hi,\n\n` +
+    `We would like to reorder ${product}. Our current stock is ${stock}.\n\n` +
+    `Please confirm availability, price, and lead time. Also let us know if there are any ordering requirements.\n\n` +
+    `Thank you.`
+  );
+}
+
+function openReorderModal(productId) {
+  const modalEl = document.getElementById("reorderModal");
+  const alertEl = document.getElementById("reorder-alert");
+  const textEl = document.getElementById("reorder-email-text");
+  const sendBtn = document.getElementById("btn-send-reorder-email");
+  const waBtn = document.getElementById("btn-open-reorder-whatsapp");
+  if (!modalEl || !alertEl || !textEl || !sendBtn || !waBtn) return;
+
+  const product = allProducts.find((p) => String(p.id) === String(productId)) || null;
+  if (!product) {
+    alertEl.textContent = "Product not found.";
+    alertEl.className = "alert alert-danger py-2 small";
+    alertEl.classList.remove("d-none");
+    sendBtn.disabled = true;
+    waBtn.disabled = true;
+    return;
+  }
+
+  modalEl.dataset.productId = String(productId);
+  modalEl.dataset.subject = `Reorder request: ${product.name || "Product"}`;
+  alertEl.className = "alert alert-info py-2 small d-none";
+  alertEl.textContent = "";
+  sendBtn.disabled = true;
+  waBtn.disabled = true;
+  textEl.value = defaultReorderEmailText({
+    productName: product.name,
+    stockQuantity: product.stock_quantity,
+  });
+
+  if (product.supplier_id != null) {
+    fetch(`${SUPPLIERS_API}/${encodeURIComponent(product.supplier_id)}`, { headers: authHeaders() })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        const contact = data?.supplier?.contact ?? "";
+        const emailAvailable = isValidEmailContact(contact);
+        const phoneLocal = normalizePhoneInput(String(contact || ""));
+        const phoneAvailable = isPhoneValid(phoneLocal);
+
+        sendBtn.disabled = !emailAvailable;
+        waBtn.disabled = !phoneAvailable;
+
+        if (!emailAvailable && !phoneAvailable) {
+          alertEl.textContent = "Temporarily not available";
+          alertEl.className = "alert alert-warning py-2 small";
+          alertEl.classList.remove("d-none");
+          return;
+        }
+
+        const availabilityText = [
+          emailAvailable ? "Email available" : null,
+          phoneAvailable ? "WhatsApp available" : null,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+
+        alertEl.textContent = availabilityText;
+        alertEl.className = "alert alert-info py-2 small";
+        alertEl.classList.remove("d-none");
+      })
+      .catch(() => {
+        alertEl.textContent = "Failed to load supplier contact.";
+        alertEl.className = "alert alert-danger py-2 small";
+        alertEl.classList.remove("d-none");
+        sendBtn.disabled = true;
+        waBtn.disabled = true;
+      });
+  } else {
+    alertEl.textContent = "No supplier assigned.";
+    alertEl.className = "alert alert-warning py-2 small";
+    alertEl.classList.remove("d-none");
+    waBtn.disabled = true;
+  }
+
+  const m = new bootstrap.Modal(modalEl);
+  m.show();
 }
 
 function updateContactInputBehavior() {
@@ -897,6 +1044,129 @@ document.addEventListener("click", (e) => {
     const productId = btn?.dataset.productId;
     const product = productId ? allProducts.find((p) => p.id == productId) : null;
     if (product) showRecordInfoModal(product);
+  }
+  if (e.target.closest("[data-action='reorder-product']")) {
+    const btn = e.target.closest("[data-action='reorder-product']");
+    const productId = btn?.dataset.productId;
+    if (productId) openReorderModal(productId);
+    return;
+  }
+
+  const sendReorderBtn = e.target.closest("[data-action='send-reorder-email']");
+  if (sendReorderBtn) {
+    const modalEl = document.getElementById("reorderModal");
+    const alertEl = document.getElementById("reorder-alert");
+    const productId = modalEl?.dataset?.productId;
+    const textEl = document.getElementById("reorder-email-text");
+    const waBtn = document.getElementById("btn-open-reorder-whatsapp");
+    if (!modalEl || !alertEl || !productId || !textEl || !waBtn) return;
+    if (sendReorderBtn.disabled) return;
+
+    sendReorderBtn.disabled = true;
+    waBtn.disabled = true;
+    alertEl.className = "alert alert-info py-2 small";
+    alertEl.textContent = "Sending…";
+    alertEl.classList.remove("d-none");
+
+    const subject = (modalEl.dataset.subject || "").trim();
+    const text = textEl.value.trim();
+
+    fetch(PRODUCTS_REORDER_EMAIL_API(productId), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ subject, text }),
+    })
+      .then(async (r) => {
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.message || `HTTP ${r.status}`);
+        return data;
+      })
+      .then((data) => {
+        alertEl.className = "alert alert-success py-2 small";
+        alertEl.textContent = data?.message || "Email sent.";
+        setTimeout(() => {
+          try {
+            const m = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
+            m.hide();
+          } catch {}
+        }, 650);
+      })
+      .catch((err) => {
+        alertEl.className = "alert alert-warning py-2 small";
+        alertEl.textContent = err.message || "Failed to send email.";
+      })
+      .finally(() => {
+        sendReorderBtn.disabled = false;
+        try {
+          const pid = modalEl?.dataset?.productId;
+          const product = pid ? allProducts.find((p) => String(p.id) === String(pid)) : null;
+          if (product?.supplier_id != null) {
+            fetch(`${SUPPLIERS_API}/${encodeURIComponent(product.supplier_id)}`, { headers: authHeaders() })
+              .then((r) => (r.ok ? r.json() : null))
+              .then((data) => {
+                const contact = data?.supplier?.contact ?? "";
+                const phoneLocal = normalizePhoneInput(String(contact || ""));
+                waBtn.disabled = !isPhoneValid(phoneLocal);
+              })
+              .catch(() => {
+                waBtn.disabled = true;
+              });
+          } else {
+            waBtn.disabled = true;
+          }
+        } catch {
+          waBtn.disabled = true;
+        }
+      });
+    return;
+  }
+
+  const openReorderWaBtn = e.target.closest("[data-action='open-reorder-whatsapp']");
+  if (openReorderWaBtn) {
+    const modalEl = document.getElementById("reorderModal");
+    const alertEl = document.getElementById("reorder-alert");
+    const productId = modalEl?.dataset?.productId;
+    const textEl = document.getElementById("reorder-email-text");
+    if (!modalEl || !alertEl || !productId || !textEl) return;
+    if (openReorderWaBtn.disabled) return;
+
+    openReorderWaBtn.disabled = true;
+    alertEl.className = "alert alert-info py-2 small";
+    alertEl.textContent = "Opening WhatsApp…";
+    alertEl.classList.remove("d-none");
+
+    const text = textEl.value.trim();
+    const product = allProducts.find((p) => String(p.id) === String(productId)) || null;
+    if (!product?.supplier_id) {
+      alertEl.className = "alert alert-warning py-2 small";
+      alertEl.textContent = "No supplier assigned.";
+      openReorderWaBtn.disabled = false;
+      return;
+    }
+
+    fetch(`${SUPPLIERS_API}/${encodeURIComponent(product.supplier_id)}`, { headers: authHeaders() })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        const contact = data?.supplier?.contact ?? "";
+        const ok = openWhatsAppOnce({ phone09: contact, text });
+        if (!ok) throw new Error("Temporarily not available");
+        alertEl.className = "alert alert-success py-2 small";
+        alertEl.textContent = "Opening WhatsApp…";
+        setTimeout(() => {
+          try {
+            const m = bootstrap.Modal.getInstance(modalEl) || new bootstrap.Modal(modalEl);
+            m.hide();
+          } catch {}
+        }, 450);
+      })
+      .catch((err) => {
+        alertEl.className = "alert alert-warning py-2 small";
+        alertEl.textContent = err?.message || "Failed to open WhatsApp.";
+      })
+      .finally(() => {
+        openReorderWaBtn.disabled = false;
+      });
+    return;
   }
   // Handle edit product button click
   const editBtn = e.target.closest("button[data-action='edit-product']");

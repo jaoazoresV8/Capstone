@@ -31,6 +31,8 @@ dotenv.config({ path: path.join(__dirname, "..", ".env") });
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+const CENTRAL_SYNC_DEBUG = (process.env.CENTRAL_SYNC_DEBUG || "").trim() === "1";
+
 async function getClientIdSetting() {
   const fallback = (process.env.CLIENT_ID || "").trim() || "client";
   try {
@@ -547,11 +549,9 @@ function startCentralSyncWorker() {
 
       if (!resp.ok) {
         const text = await resp.text().catch(() => "");
-        console.error(
-          "[CentralSync] push failed:",
-          resp.status,
-          text.slice(0, 200)
-        );
+        if (CENTRAL_SYNC_DEBUG) {
+          console.error("[CentralSync] push failed:", resp.status, text.slice(0, 200));
+        }
         return;
       }
 
@@ -561,13 +561,15 @@ function startCentralSyncWorker() {
         [String(maxId)]
       );
 
-      console.log(
-        `[CentralSync] pushed ${changes.length} change(s), now at id ${maxId}`
-      );
+      if (CENTRAL_SYNC_DEBUG) {
+        console.log(`[CentralSync] pushed ${changes.length} change(s), now at id ${maxId}`);
+      }
     } catch (e) {
       hadError = true;
       if (!pushErrorLogged) {
-        console.error("[CentralSync] error during push:", e?.message || e);
+        if (CENTRAL_SYNC_DEBUG) {
+          console.error("[CentralSync] error during push:", e?.message || e);
+        }
         pushErrorLogged = true;
       }
     } finally {
@@ -991,7 +993,9 @@ async function applyCentralChangeToLocal(change, payload) {
             );
           }
         } catch (e) {
-          console.error("[CentralSync] failed to reconcile payments for sale", saleId, e?.message || e);
+          if (CENTRAL_SYNC_DEBUG) {
+            console.error("[CentralSync] failed to reconcile payments for sale", saleId, e?.message || e);
+          }
         }
 
         // If we still don't have an OR number (payload didn't include it), fetch the sale from central so we display OR-004 etc. instead of sale_id.
@@ -1077,7 +1081,9 @@ async function applyCentralChangeToLocal(change, payload) {
         return;
     }
   } catch (e) {
-    console.error("[CentralSync] failed to apply change:", entityType, op, e?.message || e);
+    if (CENTRAL_SYNC_DEBUG) {
+      console.error("[CentralSync] failed to apply change:", entityType, op, e?.message || e);
+    }
   }
 }
 
@@ -1108,11 +1114,9 @@ function startCentralPullWorker() {
       );
       if (!resp.ok) {
         const text = await resp.text().catch(() => "");
-        console.error(
-          "[CentralSync] pull failed:",
-          resp.status,
-          String(text || "").slice(0, 200)
-        );
+        if (CENTRAL_SYNC_DEBUG) {
+          console.error("[CentralSync] pull failed:", resp.status, String(text || "").slice(0, 200));
+        }
         return;
       }
 
@@ -1184,7 +1188,9 @@ function startCentralPullWorker() {
     } catch (e) {
       hadError = true;
       if (!pullErrorLogged) {
-        console.error("[CentralSync] error during pull:", e?.message || e);
+        if (CENTRAL_SYNC_DEBUG) {
+          console.error("[CentralSync] error during pull:", e?.message || e);
+        }
         pullErrorLogged = true;
       }
     } finally {

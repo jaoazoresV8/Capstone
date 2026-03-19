@@ -2,9 +2,124 @@ import express from "express";
 import pool, { tableHasColumn } from "../db.js";
 import { authenticateToken } from "../middleware/authMiddleware.js";
 import { logChange } from "../changeLog.js";
+import { sendMail } from "../utils/mailer.js";
 
 const router = express.Router();
 router.use(authenticateToken);
+
+function escapeHtml(s) {
+  if (s == null) return "";
+  const str = String(s);
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function formatMoneyPhp(n) {
+  const v = Number(n || 0);
+  return `₱${v.toFixed(2)}`;
+}
+
+async function loadLatestSaleForCustomer(customerId) {
+  const id = Number(customerId);
+  if (!Number.isInteger(id) || id <= 0) return null;
+
+  const hasOrNumber = tableHasColumn("sales", "or_number");
+  const hasCustomerName = tableHasColumn("sales", "customer_name");
+  const hasPaymentMethod = tableHasColumn("sales", "payment_method");
+
+  const selectCustomerName = hasCustomerName
+    ? "s.customer_name AS customer_name,"
+    : "NULL AS customer_name,";
+  const selectOr = hasOrNumber ? "s.or_number AS or_number," : "NULL AS or_number,";
+  const selectPaymentMethod = hasPaymentMethod
+    ? "s.payment_method AS payment_method,"
+    : "NULL AS payment_method,";
+
+  const [rows] = await pool.query(
+    `SELECT
+        s.sale_id AS id,
+        s.sale_date,
+        s.customer_id,
+        ${selectCustomerName}
+        ${selectOr}
+        ${selectPaymentMethod}
+        s.total_amount,
+        s.amount_paid,
+        s.remaining_balance,
+        s.status
+     FROM sales s
+     WHERE s.customer_id = ?
+     ORDER BY datetime(s.sale_date) DESC, s.sale_id DESC
+     LIMIT 1`,
+    [id]
+  );
+
+  const sale = rows && rows[0] ? rows[0] : null;
+  if (!sale) return null;
+
+  const [itemRows] = await pool.query(
+    `SELECT p.name AS product_name, si.quantity, si.price, si.subtotal
+     FROM sale_items si
+     LEFT JOIN products p ON p.product_id = si.product_id
+     WHERE si.sale_id = ?
+     ORDER BY si.sale_item_id ASC`,
+    [sale.id]
+  );
+  sale.items = Array.isArray(itemRows) ? itemRows : [];
+  return sale;
+}
+
+function buildReceiptHtmlForEmail({ customerName, sale }) {
+  if (!sale) return "";
+  const totalAmount = Number(sale.total_amount || 0);
+  const amountPaid = Number(sale.amount_paid || 0);
+  const balance = Number(sale.remaining_balance || 0);
+  const orNumber = sale.or_number || "";
+
+  const items = (Array.isArray(sale.items) ? sale.items : [])
+    .map(
+      (i) =>
+        `<tr><td style="padding:6px 8px;border-bottom:1px solid #eee;">${escapeHtml(
+          i.product_name || ""
+        )}</td><td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right;">${Number(
+          i.quantity || 0
+        )}</td><td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right;white-space:nowrap;">${escapeHtml(
+          formatMoneyPhp(i.price || 0)
+        )}</td><td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right;white-space:nowrap;">${escapeHtml(
+          formatMoneyPhp(i.subtotal || 0)
+        )}</td></tr>`
+    )
+    .join("");
+
+  return `
+    <div style="margin-top:16px;border-top:1px solid #eee;padding-top:12px;">
+      <div style="font-weight:700;margin-bottom:6px;">Receipt (latest outstanding sale)</div>
+      <div style="font-size:13px;color:#444;margin-bottom:8px;">
+        <div><strong>Sale #</strong> ${escapeHtml(String(orNumber || sale.id || "—"))}</div>
+        <div><strong>Customer</strong> ${escapeHtml(customerName || sale.customer_name || "—")}</div>
+      </div>
+      <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;font-size:13px;">
+        <thead>
+          <tr>
+            <th align="left" style="padding:6px 8px;border-bottom:1px solid #ddd;background:#f8f9fa;">Description</th>
+            <th align="right" style="padding:6px 8px;border-bottom:1px solid #ddd;background:#f8f9fa;">Qty</th>
+            <th align="right" style="padding:6px 8px;border-bottom:1px solid #ddd;background:#f8f9fa;">Unit</th>
+            <th align="right" style="padding:6px 8px;border-bottom:1px solid #ddd;background:#f8f9fa;">Amount</th>
+          </tr>
+        </thead>
+        <tbody>${items}</tbody>
+      </table>
+      <div style="margin-top:10px;font-size:13px;">
+        <div style="display:flex;justify-content:space-between;"><span>Total</span><span style="white-space:nowrap;">${escapeHtml(formatMoneyPhp(totalAmount))}</span></div>
+        <div style="display:flex;justify-content:space-between;"><span>Paid</span><span style="white-space:nowrap;">${escapeHtml(formatMoneyPhp(amountPaid))}</span></div>
+        <div style="display:flex;justify-content:space-between;font-weight:700;"><span>Balance</span><span style="white-space:nowrap;">${escapeHtml(formatMoneyPhp(Math.max(0, balance)))}</span></div>
+      </div>
+    </div>
+  `;
+}
 
 router.get("/", async (req, res) => {
   try {
@@ -366,6 +481,191 @@ router.put("/:id", async (req, res) => {
   } catch (err) {
     console.error("PUT /api/customers/:id:", err);
     return res.status(500).json({ message: "Failed to update customer." });
+  }
+});
+
+router.post("/:id/remind-balance", async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (Number.isNaN(id)) return res.status(400).json({ message: "Invalid customer ID." });
+
+    const subjectFromBody =
+      typeof req.body?.subject === "string" ? req.body.subject.trim() : "";
+    const textFromBody =
+      typeof req.body?.text === "string" ? req.body.text.trim() : "";
+
+    const hasEmailCol = tableHasColumn("customers", "email");
+    const selectEmail = hasEmailCol ? ", email" : "";
+    const [rows] = await pool.query(
+      `SELECT customer_id AS id, name, contact, total_balance${selectEmail}
+       FROM customers
+       WHERE customer_id = ?
+       LIMIT 1`,
+      [id]
+    );
+    const customer = rows?.[0];
+    if (!customer) return res.status(404).json({ message: "Customer not found." });
+
+    const balance = Number(customer.total_balance || 0);
+    if (!(balance > 0)) {
+      return res.status(400).json({ message: "Customer has no outstanding balance." });
+    }
+
+    const contact = customer.contact != null ? String(customer.contact).trim() : "";
+    const emailCol = hasEmailCol ? (customer.email != null ? String(customer.email).trim() : "") : "";
+    const to = (emailCol && emailCol.includes("@")) ? emailCol : (contact.includes("@") ? contact : "");
+    if (!to) {
+      return res.status(400).json({
+        message:
+          "No email found for this customer. Set the customer's contact to an email address (or add an email field).",
+      });
+    }
+
+    const name = customer.name || "Customer";
+    const amount = `₱${balance.toFixed(2)}`;
+    const text =
+      textFromBody ||
+      `Hi ${name},\n\n` +
+        `This is a reminder that you have an outstanding balance of ${amount}.\n\n` +
+        `If you already paid, please ignore this message.\n\n` +
+        `Thank you.`;
+    const subject = subjectFromBody || "Outstanding Balance Reminder";
+
+    const messageHtml = escapeHtml(text).replace(/\r?\n/g, "<br/>");
+    const sale = await loadLatestSaleForCustomer(id);
+    const receiptHtml = buildReceiptHtmlForEmail({ customerName: name, sale });
+    const html = [
+      "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>",
+      "<style>",
+      "body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 24px; background: #f5f5f5; }",
+      ".email-wrap { max-width: 560px; margin: 0 auto; background: #fff; border-radius: 10px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.08); }",
+      ".email-header { background: #2c3e50; padding: 14px 18px; color: #fff; font-weight: 700; }",
+      ".email-body { padding: 20px 22px; color: #333; line-height: 1.6; font-size: 15px; }",
+      ".message-box { background: #ffffff; border: 1px solid #dee2e6; border-radius: 8px; padding: 14px 16px; margin: 12px 0 0; }",
+      ".email-footer { padding: 14px 22px; background: #f8f9fa; font-size: 12px; color: #6c757d; }",
+      "</style></head><body>",
+      "<div class='email-wrap'>",
+      "<div class='email-header'>D&M Sales</div>",
+      "<div class='email-body'>",
+      `<p style="margin:0 0 8px;">Hi ${escapeHtml(name)},</p>`,
+      `<div class='message-box'>${messageHtml}</div>`,
+      receiptHtml || "",
+      "</div>",
+      "<div class='email-footer'>— D&M Sales Admin</div>",
+      "</div></body></html>",
+    ].join("");
+
+    await sendMail({ to, subject, text, html });
+    return res.json({ message: `Reminder sent to ${to}.` });
+  } catch (err) {
+    console.error("POST /api/customers/:id/remind-balance:", err);
+    const msg =
+      err?.code === "MAIL_NOT_CONFIGURED"
+        ? "Email is not configured on the server. Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, MAIL_FROM."
+        : "Failed to send reminder email.";
+    return res.status(500).json({ message: msg });
+  }
+});
+
+router.post("/remind-balance-bulk", async (req, res) => {
+  try {
+    const subjectFromBody =
+      typeof req.body?.subject === "string" ? req.body.subject.trim() : "";
+    const textFromBody =
+      typeof req.body?.text === "string" ? req.body.text.trim() : "";
+    const subject = subjectFromBody || "Outstanding Balance Reminder";
+
+    const hasEmailCol = tableHasColumn("customers", "email");
+    const selectEmail = hasEmailCol ? ", email" : "";
+    const [rows] = await pool.query(
+      `SELECT customer_id AS id, name, contact, total_balance${selectEmail}
+       FROM customers
+       WHERE total_balance > 0
+       ORDER BY name`
+    );
+    const list = Array.isArray(rows) ? rows : [];
+    if (list.length === 0) {
+      return res.json({
+        message: "No customers with outstanding balance.",
+        sent: 0,
+        skipped: 0,
+        emailed: [],
+        phoneOnly: [],
+        noContact: [],
+      });
+    }
+
+    const emailed = [];
+    const phoneOnly = [];
+    const noContact = [];
+
+    const baseText =
+      textFromBody ||
+      `Hi,\n\n` +
+        `This is a reminder that you have an outstanding balance with us.\n\n` +
+        `If you already paid, please ignore this message.\n\n` +
+        `Thank you.`;
+
+    for (const c of list) {
+      const name = c?.name || "Customer";
+      const balance = Number(c?.total_balance || 0);
+      if (!(balance > 0)) continue;
+
+      const contact = c?.contact != null ? String(c.contact).trim() : "";
+      const emailCol = hasEmailCol ? (c?.email != null ? String(c.email).trim() : "") : "";
+      const to = (emailCol && emailCol.includes("@")) ? emailCol : (contact.includes("@") ? contact : "");
+      if (!to) {
+        const digits = contact.replace(/\D/g, "");
+        if (digits.length >= 10) phoneOnly.push({ id: c.id, name, contact });
+        else noContact.push({ id: c.id, name, contact });
+        continue;
+      }
+
+      const text = baseText.replace(/^Hi\b.*?,/m, `Hi ${name},`);
+      const messageHtml = escapeHtml(text).replace(/\r?\n/g, "<br/>");
+      const sale = await loadLatestSaleForCustomer(c.id);
+      const receiptHtml = buildReceiptHtmlForEmail({ customerName: name, sale });
+
+      const html = [
+        "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'>",
+        "<style>",
+        "body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 24px; background: #f5f5f5; }",
+        ".email-wrap { max-width: 560px; margin: 0 auto; background: #fff; border-radius: 10px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.08); }",
+        ".email-header { background: #2c3e50; padding: 14px 18px; color: #fff; font-weight: 700; }",
+        ".email-body { padding: 20px 22px; color: #333; line-height: 1.6; font-size: 15px; }",
+        ".message-box { background: #ffffff; border: 1px solid #dee2e6; border-radius: 8px; padding: 14px 16px; margin: 12px 0 0; }",
+        ".email-footer { padding: 14px 22px; background: #f8f9fa; font-size: 12px; color: #6c757d; }",
+        "</style></head><body>",
+        "<div class='email-wrap'>",
+        "<div class='email-header'>D&M Sales</div>",
+        "<div class='email-body'>",
+        `<p style="margin:0 0 8px;">Hi ${escapeHtml(name)},</p>`,
+        `<div class='message-box'>${messageHtml}</div>`,
+        receiptHtml || "",
+        "</div>",
+        "<div class='email-footer'>— D&M Sales Admin</div>",
+        "</div></body></html>",
+      ].join("");
+
+      await sendMail({ to, subject, text, html });
+      emailed.push({ id: c.id, name, to });
+    }
+
+    return res.json({
+      message: `Sent ${emailed.length} email(s).`,
+      sent: emailed.length,
+      skipped: phoneOnly.length + noContact.length,
+      emailed,
+      phoneOnly,
+      noContact,
+    });
+  } catch (err) {
+    console.error("POST /api/customers/remind-balance-bulk:", err);
+    const msg =
+      err?.code === "MAIL_NOT_CONFIGURED"
+        ? "Email is not configured on the server. Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, MAIL_FROM."
+        : "Failed to send bulk reminder emails.";
+    return res.status(500).json({ message: msg });
   }
 });
 

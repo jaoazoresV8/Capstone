@@ -732,31 +732,13 @@ async function loadDashboardOverview() {
   try {
     const res = await fetch(DASHBOARD_API, { headers: getAuthHeaders() });
     if (!res.ok) {
-      console.warn("[Dashboard] overview API not ok:", res.status, res.statusText);
       return;
     }
     const data = await res.json().catch((parseErr) => {
-      console.warn("[Dashboard] overview JSON parse failed:", parseErr?.message || parseErr);
       return null;
     });
     if (!data || typeof data !== "object") {
-      console.warn("[Dashboard] overview data missing or invalid");
       return;
-    }
-    // Log why Top 5 / Recent Activity might be empty
-    const topProducts = Array.isArray(data.topProducts) ? data.topProducts : [];
-    const recentActivity = Array.isArray(data.recentActivity) ? data.recentActivity : [];
-    console.log("[Dashboard] overview loaded:", {
-      topProductsCount: topProducts.length,
-      recentActivityCount: recentActivity.length,
-      todaySalesAmount: data.todaySalesAmount,
-      todaySalesCount: data.todaySalesCount,
-    });
-    if (!topProducts.length && (data.todaySalesAmount > 0 || data.todaySalesCount > 0)) {
-      console.warn("[Dashboard] Top 5 products is empty but sales exist — check backend 'this month' filter or sale_items join.");
-    }
-    if (!recentActivity.length && (data.todaySalesAmount > 0 || data.todaySalesCount > 0)) {
-      console.warn("[Dashboard] Recent activity is empty but sales exist — check backend sales/payments queries.");
     }
 
     // Today sales
@@ -991,7 +973,7 @@ async function loadDashboardOverview() {
       }
     }
   } catch (err) {
-    console.warn("loadDashboardOverview failed:", err?.message || err);
+    // ignore
   } finally {
     document.body.classList.remove("page-loading");
   }
@@ -1144,6 +1126,7 @@ window.addEventListener("DOMContentLoaded", () => {
 
 window.addEventListener("pjax:complete", (e) => {
   if (e.detail && e.detail.page === "overview") {
+    initOpenInAppOrWebLink();
     loadMarkupSetting();
     loadDashboardOverview();
   }

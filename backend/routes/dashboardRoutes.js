@@ -99,9 +99,6 @@ router.get("/overview", async (req, res) => {
           total_qty: r.total_qty,
           total_amount: r.total_amount,
         }));
-        console.log("[Dashboard] Top 5 products: this month had 0 rows, using all-time fallback, count =", topProducts.length);
-      } else {
-        console.log("[Dashboard] Top 5 products: this month count =", topProducts.length);
       }
     } catch (topErr) {
       console.warn("GET /api/dashboard/overview: top products failed:", topErr?.message || topErr);
@@ -149,7 +146,6 @@ router.get("/overview", async (req, res) => {
         return tB - tA;
       });
       recentActivity = items.slice(0, 10);
-      console.log("[Dashboard] Recent activity: sales=", (salesRows || []).length, "payments=", (paymentsRows || []).length, "merged=", recentActivity.length);
     } catch (activityErr) {
       console.warn("GET /api/dashboard/overview: recent activity failed:", activityErr?.message || activityErr);
       if (activityErr?.stack) console.warn(activityErr.stack);

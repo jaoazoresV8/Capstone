@@ -153,8 +153,18 @@ ipcMain.handle("print-receipt-to-pdf", async (_event, fullPrintDocHtml) => {
 });
 
 ipcMain.handle("open-external", (_event, url) => {
-  if (typeof url === "string" && (url.startsWith("http://") || url.startsWith("https://"))) {
-    shell.openExternal(url);
+  if (typeof url !== "string") return;
+  const u = url.trim();
+  if (!u) return;
+  // Allow common external schemes used by the UI (WhatsApp deep link + web URLs).
+  if (
+    u.startsWith("http://") ||
+    u.startsWith("https://") ||
+    u.startsWith("whatsapp://") ||
+    u.startsWith("mailto:") ||
+    u.startsWith("tel:")
+  ) {
+    shell.openExternal(u);
   }
 });
 
@@ -215,8 +225,12 @@ function createWindow() {
       mainWindow = null;
     });
 
-    // Always open DevTools to make debugging easier (you can close them manually).
-    mainWindow.webContents.openDevTools({ mode: "detach" });
+    // Don't open DevTools by default (even in dev).
+    // Enable only when explicitly requested.
+    const shouldOpenDevTools = process.env.ELECTRON_OPEN_DEVTOOLS === "1";
+    if (shouldOpenDevTools) {
+      mainWindow.webContents.openDevTools({ mode: "detach" });
+    }
   } catch (err) {
     showError("Window Creation Error", `Failed to create window: ${err.message}`);
     throw err;

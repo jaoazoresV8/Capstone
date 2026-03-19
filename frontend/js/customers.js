@@ -3,6 +3,7 @@
  */
 import { API_ORIGIN } from "./config.js";
 const CUSTOMERS_API = `${API_ORIGIN}/api/customers`;
+const CUSTOMER_REMIND_BALANCE_BULK_API = `${CUSTOMERS_API}/remind-balance-bulk`;
 
 function getToken() {
   return localStorage.getItem("sm_token");
@@ -24,8 +25,99 @@ let lastRenderedCustomers = [];
 let currentCustomerDetails = null;
 const saleDetailsCache = {};
 let pendingCustomerSaleConfirm = null;
+let notifyAllPhoneOnly = [];
+let notifyAllPhoneOnlyCursor = 0;
 
 const SALES_API = `${API_ORIGIN}/api/sales`;
+
+function normalizePhoneInput(val) {
+  const digits = String(val || "").replace(/\\D/g, "");
+  if (digits.length === 0) return "";
+  let s = digits.slice(0, 11);
+  if (s.length >= 1 && s[0] === "9") s = "0" + s.slice(0, 10);
+  return s.slice(0, 11);
+}
+
+function isPhoneValid(val) {
+  return /^09\\d{9}$/.test(String(val || ""));
+}
+
+function toWhatsAppPhoneDigitsPhilippines(phone09) {
+  const digits = String(phone09 || "").replace(/\\D/g, "");
+  if (/^09\\d{9}$/.test(digits)) return `63${digits.slice(1)}`;
+  if (/^9\\d{9}$/.test(digits)) return `63${digits}`;
+  if (/^63\\d{10}$/.test(digits)) return digits;
+  return "";
+}
+
+function openExternalUrl(url) {
+  if (!url) return;
+  try {
+    if (window.electronAPI && typeof window.electronAPI.openExternal === "function") {
+      window.electronAPI.openExternal(url);
+      return;
+    }
+  } catch {}
+  try {
+    // In regular browsers, prefer same-tab navigation to avoid popup blockers.
+    window.location.assign(url);
+  } catch {}
+}
+
+function openWhatsAppOnce({ phone09, text }) {
+  const phoneLocal = normalizePhoneInput(String(phone09 || ""));
+  if (!isPhoneValid(phoneLocal)) return false;
+  const digits = toWhatsAppPhoneDigitsPhilippines(phoneLocal);
+  if (!digits) return false;
+  const msg = String(text || "").trim();
+  const protoUrl = `whatsapp://send?phone=${digits}${msg ? `&text=${encodeURIComponent(msg)}` : ""}`;
+  const apiUrl = `https://api.whatsapp.com/send?phone=${digits}${msg ? `&text=${encodeURIComponent(msg)}` : ""}`;
+  const isElectron = !!(window.electronAPI && typeof window.electronAPI.openExternal === "function");
+  openExternalUrl(isElectron ? protoUrl : apiUrl);
+  return true;
+}
+
+function defaultCustomerReminderText() {
+  return (
+    `Hi,\n\n` +
+    `This is a reminder that you have an outstanding balance with us.\n\n` +
+    `If you already paid, please ignore this message.\n\n` +
+    `Thank you.`
+  );
+}
+
+function getTotalBalance(c) {
+  const v = c?.total_balance ?? c?.totalBalance ?? 0;
+  return Number(v) || 0;
+}
+
+function openCustomerNotifyAllModal() {
+  const modalEl = document.getElementById("customerNotifyAllModal");
+  const alertEl = document.getElementById("customer-notifyall-alert");
+  const textEl = document.getElementById("customer-notifyall-text");
+  const resultEl = document.getElementById("customer-notifyall-result");
+  const sendBtn = document.getElementById("btn-send-notifyall-email");
+  const waBtn = document.getElementById("btn-open-notifyall-whatsapp");
+  if (!modalEl || !alertEl || !textEl || !resultEl || !sendBtn || !waBtn) return;
+
+  notifyAllPhoneOnly = [];
+  notifyAllPhoneOnlyCursor = 0;
+  resultEl.classList.add("d-none");
+  resultEl.innerHTML = "";
+  waBtn.classList.add("d-none");
+
+  const withBalanceCount = (allCustomers || []).filter((c) => getTotalBalance(c) > 0).length;
+  alertEl.className = "alert alert-info py-2 small";
+  alertEl.textContent =
+    withBalanceCount > 0 ? `Customers with balance: ${withBalanceCount}` : "No customers with outstanding balance.";
+  alertEl.classList.remove("d-none");
+
+  textEl.value = defaultCustomerReminderText();
+  sendBtn.disabled = withBalanceCount <= 0;
+
+  const m = bootstrap.Modal.getOrCreateInstance(modalEl);
+  m.show();
+}
 
 function isAdmin() {
   const raw = localStorage.getItem("sm_user");
@@ -504,6 +596,12 @@ document.addEventListener("change", (e) => {
 });
 
 document.addEventListener("click", (e) => {
+  const notifyAllBtn = e.target.closest("#btn-notify-balance-all");
+  if (notifyAllBtn) {
+    e.preventDefault();
+    openCustomerNotifyAllModal();
+    return;
+  }
   const applyBtn = e.target.closest("#btn-customer-search");
   if (applyBtn) {
     loadCustomers({ ...getCustomersParams() });
@@ -565,6 +663,99 @@ document.addEventListener("click", (e) => {
     if (saleId) {
       const params = new URLSearchParams({ saleId: String(saleId), focusIssue: "1" });
       window.location.href = `./sales.html?${params.toString()}`;
+    }
+    return;
+  }
+
+  const sendAllBtn = e.target.closest("[data-action='send-notifyall-email']");
+  if (sendAllBtn) {
+    const modalEl = document.getElementById("customerNotifyAllModal");
+    const alertEl = document.getElementById("customer-notifyall-alert");
+    const textEl = document.getElementById("customer-notifyall-text");
+    const resultEl = document.getElementById("customer-notifyall-result");
+    const waBtn = document.getElementById("btn-open-notifyall-whatsapp");
+    if (!modalEl || !alertEl || !textEl || !resultEl || !waBtn) return;
+    if (sendAllBtn.disabled) return;
+
+    sendAllBtn.disabled = true;
+    waBtn.classList.add("d-none");
+    alertEl.className = "alert alert-info py-2 small";
+    alertEl.textContent = "Sending emails…";
+    alertEl.classList.remove("d-none");
+
+    const subject = "Outstanding Balance Reminder";
+    const text = textEl.value.trim();
+
+    fetch(CUSTOMER_REMIND_BALANCE_BULK_API, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ subject, text }),
+    })
+      .then(async (r) => {
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.message || `HTTP ${r.status}`);
+        return data;
+      })
+      .then((data) => {
+        const sent = Number(data?.sent || 0);
+        const skipped = Number(data?.skipped || 0);
+        const phoneOnly = Array.isArray(data?.phoneOnly) ? data.phoneOnly : [];
+        const noContact = Array.isArray(data?.noContact) ? data.noContact : [];
+        notifyAllPhoneOnly = phoneOnly;
+
+        alertEl.className = "alert alert-success py-2 small";
+        alertEl.textContent = data?.message || `Sent ${sent} email(s).`;
+        alertEl.classList.remove("d-none");
+
+        resultEl.classList.remove("d-none");
+        resultEl.innerHTML =
+          `<div class="border rounded p-2 bg-light small">` +
+          `<div><strong>Sent:</strong> ${sent}</div>` +
+          `<div><strong>Skipped:</strong> ${skipped}</div>` +
+          `<div class="text-muted mt-1">Phone-only: ${phoneOnly.length} · No contact: ${noContact.length}</div>` +
+          `</div>`;
+
+        if (phoneOnly.length > 0) {
+          waBtn.classList.remove("d-none");
+        }
+      })
+      .catch((err) => {
+        alertEl.className = "alert alert-warning py-2 small";
+        alertEl.textContent = err.message || "Failed to send emails.";
+        alertEl.classList.remove("d-none");
+      })
+      .finally(() => {
+        sendAllBtn.disabled = false;
+      });
+    return;
+  }
+
+  const waAllBtn = e.target.closest("[data-action='open-notifyall-whatsapp']");
+  if (waAllBtn) {
+    const modalEl = document.getElementById("customerNotifyAllModal");
+    const alertEl = document.getElementById("customer-notifyall-alert");
+    const textEl = document.getElementById("customer-notifyall-text");
+    if (!modalEl || !alertEl || !textEl) return;
+    if (!Array.isArray(notifyAllPhoneOnly) || notifyAllPhoneOnly.length === 0) return;
+
+    const msg = textEl.value.trim();
+    while (notifyAllPhoneOnlyCursor < notifyAllPhoneOnly.length) {
+      const item = notifyAllPhoneOnly[notifyAllPhoneOnlyCursor];
+      notifyAllPhoneOnlyCursor += 1;
+      const ok = openWhatsAppOnce({ phone09: item?.contact || "", text: msg });
+      if (ok) break;
+    }
+
+    const remaining = Math.max(0, notifyAllPhoneOnly.length - notifyAllPhoneOnlyCursor);
+    alertEl.className = "alert alert-info py-2 small";
+    alertEl.textContent =
+      remaining > 0
+        ? `Opened WhatsApp (${notifyAllPhoneOnlyCursor}/${notifyAllPhoneOnly.length}). Click again to open next (${remaining} remaining).`
+        : `Opened WhatsApp for all phone-only customers (${notifyAllPhoneOnly.length}).`;
+    alertEl.classList.remove("d-none");
+
+    if (remaining <= 0) {
+      waAllBtn.classList.add("d-none");
     }
     return;
   }
