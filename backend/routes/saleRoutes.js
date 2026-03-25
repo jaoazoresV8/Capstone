@@ -556,6 +556,13 @@ router.post("/", async (req, res) => {
       ]);
     }
 
+    // Defensive cleanup: if this local sale_id was previously used by stale pulled data
+    // (e.g. mapped central issue rows from an older branch session), remove them so a
+    // brand-new sale does not appear auto-flagged.
+    try {
+      await conn.query("DELETE FROM sale_issues WHERE sale_id = ?", [saleId]);
+    } catch (_) {}
+
     for (const it of lineItems) {
       await conn.query(
         "INSERT INTO sale_items (sale_id, product_id, quantity, price, subtotal) VALUES (?, ?, ?, ?, ?)",

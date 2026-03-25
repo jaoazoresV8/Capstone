@@ -47,6 +47,9 @@ export function initSalesIssuesIndicator() {
       // Initial fetch + polling for admins
       refreshDot();
       polling = setInterval(refreshDot, 15000);
+      window.addEventListener("central:refresh", () => {
+        void refreshDot();
+      });
     }
   } catch {
     // Ignore JSON errors

@@ -33,6 +33,39 @@ const PORT = process.env.PORT || 5000;
 
 const CENTRAL_SYNC_DEBUG = (process.env.CENTRAL_SYNC_DEBUG || "").trim() === "1";
 
+// Must match adminfinal `mapClientEntityIdToCentralId`: base * MULT + localId, MULT = 10_000_000.
+const CENTRAL_BRANCH_ENTITY_MULT = 10_000_000;
+
+/** Decode central sale/issue/payment IDs back to local SQLite IDs for branch-originated rows. */
+function centralEntityIdToLocal(id) {
+  const n = Number(id);
+  if (!Number.isFinite(n) || n <= 0) return n;
+  if (n >= CENTRAL_BRANCH_ENTITY_MULT) return n % CENTRAL_BRANCH_ENTITY_MULT;
+  return n;
+}
+
+/**
+ * sale_issues.cashier_id / resolved_by_admin_id FK -> users.user_id.
+ * Central user IDs often do not exist on the branch; inserting would fail silently.
+ * Keep names; only set FK when a matching local user row exists (raw or branch-mapped id).
+ */
+async function localUserFkOrNull(rawUserId) {
+  if (rawUserId == null || rawUserId === "") return null;
+  const n = Number(rawUserId);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const candidates = [n];
+  if (n >= CENTRAL_BRANCH_ENTITY_MULT) {
+    candidates.push(centralEntityIdToLocal(n));
+  }
+  for (const uid of candidates) {
+    try {
+      const [rows] = await pool.query("SELECT user_id FROM users WHERE user_id = ? LIMIT 1", [uid]);
+      if (rows && rows.length) return uid;
+    } catch (_) {}
+  }
+  return null;
+}
+
 async function getClientIdSetting() {
   const fallback = (process.env.CLIENT_ID || "").trim() || "client";
   try {
@@ -497,6 +530,23 @@ app.post("/api/sync/apply-sale-mapping", authenticateToken, async (req, res) => 
   }
 });
 
+// Monotonic tick bumped when pull applies new central rows — UI polls this to refresh lists.
+app.get("/api/sync/pulled-state", authenticateToken, async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      "SELECT setting_value FROM settings WHERE setting_key = 'central_pull_tick'"
+    );
+    const pullTick =
+      rows && rows.length && rows[0].setting_value != null
+        ? String(rows[0].setting_value)
+        : "0";
+    return res.json({ pullTick });
+  } catch (e) {
+    console.error("Error in /api/sync/pulled-state:", e?.message || e);
+    return res.json({ pullTick: "0" });
+  }
+});
+
 // Background worker: push local change_log entries to central AdminServer when available
 function startCentralSyncWorker() {
   const INTERVAL_MS = 7000;
@@ -805,9 +855,10 @@ async function applyCentralChangeToLocal(change, payload) {
         break;
       }
       case "sale": {
-        const id = data.id ?? data.sale_id ?? change.entity_id;
-        const saleId = Number(id);
-        if (!Number.isFinite(saleId) || saleId <= 0) break;
+        const rawSaleId = Number(data.id ?? data.sale_id ?? change.entity_id);
+        if (!Number.isFinite(rawSaleId) || rawSaleId <= 0) break;
+        const centralSaleIdForFetch = rawSaleId;
+        const saleId = centralEntityIdToLocal(rawSaleId);
 
         // Central/adminfinal: status-only updates (void/refund) after issue resolution — avoid
         // recomputing "paid" from balances when payload omits other sale fields.
@@ -822,10 +873,15 @@ async function applyCentralChangeToLocal(change, payload) {
           break;
         }
 
-        const customerId =
+        let customerId =
           data.customer_id != null && data.customer_id !== ""
             ? Number(data.customer_id)
             : null;
+        if (customerId != null && Number.isFinite(customerId) && customerId > 0) {
+          customerId = centralEntityIdToLocal(customerId);
+        } else {
+          customerId = null;
+        }
         const transactionType =
           typeof data.transaction_type === "string" && data.transaction_type
             ? data.transaction_type
@@ -979,9 +1035,13 @@ async function applyCentralChangeToLocal(change, payload) {
           await pool.query("DELETE FROM sale_items WHERE sale_id = ?", [saleId]);
           const nextQtyByProduct = new Map();
           for (const item of items) {
-            const productId =
+            const rawPid =
               item.product_id != null && item.product_id !== ""
                 ? Number(item.product_id)
+                : null;
+            const productId =
+              rawPid != null && Number.isFinite(rawPid) && rawPid > 0
+                ? centralEntityIdToLocal(rawPid)
                 : null;
             if (!Number.isFinite(productId) || productId <= 0) continue;
             const qty = Number(item.quantity) || 0;
@@ -1058,7 +1118,7 @@ async function applyCentralChangeToLocal(change, payload) {
             const centralUrl = await getCentralBaseUrl();
             if (centralUrl) {
               const res = await fetch(
-                `${centralUrl.replace(/\/+$/, "")}/api/sales/${encodeURIComponent(String(saleId))}`,
+                `${centralUrl.replace(/\/+$/, "")}/api/sales/${encodeURIComponent(String(centralSaleIdForFetch))}`,
                 { headers: { Accept: "application/json" } }
               );
               if (res && res.ok) {
@@ -1088,26 +1148,22 @@ async function applyCentralChangeToLocal(change, payload) {
       case "sale_issue": {
         // Mirror central sale_issue changes into local sale_issues for customer/sale UIs.
         // For voided/refunded, also mirror onto local sales.status for badge consistency.
-        const saleId = Number(data.sale_id);
-        const issueId = Number(data.issue_id ?? change.entity_id);
-        if (!Number.isFinite(saleId) || saleId <= 0 || !Number.isFinite(issueId) || issueId <= 0) break;
+        const rawSaleId = Number(data.sale_id);
+        const rawIssueId = Number(data.issue_id ?? change.entity_id);
+        if (!Number.isFinite(rawSaleId) || rawSaleId <= 0 || !Number.isFinite(rawIssueId) || rawIssueId <= 0) break;
+        const saleId = centralEntityIdToLocal(rawSaleId);
+        const issueId = centralEntityIdToLocal(rawIssueId);
 
         const st = String(data.status || "").toLowerCase() || "open";
 
         const reason = data.reason != null ? String(data.reason) : null;
         const note = data.note != null ? String(data.note) : null;
-        const cashierId =
-          data.cashier_id != null && data.cashier_id !== ""
-            ? Number(data.cashier_id)
-            : null;
         const cashierName =
           data.cashier_name != null ? String(data.cashier_name) : null;
         const createdAt = data.created_at != null ? String(data.created_at) : null;
 
-        const resolvedByAdminId =
-          data.resolved_by_admin_id != null && data.resolved_by_admin_id !== ""
-            ? Number(data.resolved_by_admin_id)
-            : null;
+        let cashierId = await localUserFkOrNull(data.cashier_id);
+        let resolvedByAdminId = await localUserFkOrNull(data.resolved_by_admin_id);
         const resolvedByAdminName =
           data.resolved_by_admin_name != null ? String(data.resolved_by_admin_name) : null;
         const resolutionNote =
@@ -1158,9 +1214,9 @@ async function applyCentralChangeToLocal(change, payload) {
         break;
       }
       case "payment": {
-        const rawSaleId = data.sale_id ?? change.entity_id;
-        const saleId = Number(rawSaleId);
-        if (!Number.isFinite(saleId) || saleId <= 0) break;
+        const rawSaleId = Number(data.sale_id ?? change.entity_id);
+        if (!Number.isFinite(rawSaleId) || rawSaleId <= 0) break;
+        const saleId = centralEntityIdToLocal(rawSaleId);
 
         const amount = Number(data.amount_paid) || 0;
         if (amount <= 0) break;
@@ -1276,20 +1332,21 @@ function startCentralPullWorker() {
             : payload && typeof payload === "object"
             ? payload
             : null;
-          const saleId = data && (data.id ?? data.sale_id) != null ? Number(data.id ?? data.sale_id) : NaN;
+          const rawSaleId = data && (data.id ?? data.sale_id) != null ? Number(data.id ?? data.sale_id) : NaN;
+          const localSaleId = Number.isFinite(rawSaleId) ? centralEntityIdToLocal(rawSaleId) : NaN;
           const centralOr = data && typeof data.or_number === "string" && data.or_number.trim()
             ? data.or_number.trim()
             : null;
-          if (Number.isFinite(saleId) && centralOr) {
+          if (Number.isFinite(localSaleId) && centralOr) {
             try {
               const [taken] = await pool.query(
                 "SELECT sale_id FROM sales WHERE or_number = ? AND sale_id != ? LIMIT 1",
-                [centralOr, saleId]
+                [centralOr, localSaleId]
               );
               if (!taken || taken.length === 0) {
                 await pool.query(
                   "UPDATE sales SET or_number = ? WHERE sale_id = ?",
-                  [centralOr, saleId]
+                  [centralOr, localSaleId]
                 );
               }
             } catch (_) {}
@@ -1306,9 +1363,14 @@ function startCentralPullWorker() {
       }
 
       if (maxId > lastId) {
+        const tick = String(Date.now());
         await pool.query(
           "INSERT INTO settings (setting_key, setting_value) VALUES ('central_last_pulled_change_id', ?) ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value",
           [String(maxId)]
+        );
+        await pool.query(
+          "INSERT INTO settings (setting_key, setting_value) VALUES ('central_pull_tick', ?) ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value",
+          [tick]
         );
       }
     } catch (e) {

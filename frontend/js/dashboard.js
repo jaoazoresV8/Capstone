@@ -1,3 +1,4 @@
+import "./sync-queue.js";
 import { initPasswordResetAdmin } from "./password-resets.js";
 import { initSalesIssuesIndicator } from "./sales-issues-indicator.js";
 import { initSaleIssuesAdmin } from "./sales-issues.js";

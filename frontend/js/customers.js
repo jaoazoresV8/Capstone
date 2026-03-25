@@ -1051,3 +1051,9 @@ if (document.readyState === "loading") {
 } else {
   setupCustomersPageObserver();
 }
+
+window.addEventListener("central:refresh", () => {
+  if (document.body?.dataset?.page === "customers") {
+    loadCustomers({ ...getCustomersParams() });
+  }
+});

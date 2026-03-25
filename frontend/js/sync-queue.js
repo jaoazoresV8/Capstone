@@ -3,6 +3,7 @@ import { API_ORIGIN } from "./config.js";
 const SYNC_PUSH_API = `${API_ORIGIN}/api/sync/push`;
 const SALE_MAPPING_API = `${API_ORIGIN}/api/sync/sale-mapping`;
 const APPLY_MAPPING_API = `${API_ORIGIN}/api/sync/apply-sale-mapping`;
+const PULLED_STATE_API = `${API_ORIGIN}/api/sync/pulled-state`;
 const SYNC_QUEUE_KEY = "sm_sync_queue";
 const CLIENT_ID_KEY = "sm_client_id";
 const SALE_UUID_MAP_KEY = "sm_sale_uuid_map";
@@ -121,6 +122,29 @@ function ensureLocalId(op) {
 }
 
 let flushing = false;
+let lastPullTick = null;
+
+async function pollPulledState() {
+  const token = getToken();
+  if (!token || typeof window === "undefined") return;
+  try {
+    const res = await fetch(PULLED_STATE_API, { headers: authHeaders() });
+    const data = await res.json().catch(() => ({}));
+    const tick = data.pullTick != null ? String(data.pullTick) : "0";
+    if (lastPullTick === null) {
+      lastPullTick = tick;
+      return;
+    }
+    if (tick !== lastPullTick) {
+      lastPullTick = tick;
+      if (typeof window.dispatchEvent === "function") {
+        window.dispatchEvent(new CustomEvent("central:refresh", { bubbles: true }));
+      }
+    }
+  } catch (_) {
+    // ignore
+  }
+}
 
 export function enqueueSyncOperation(operation) {
   if (!operation || typeof operation !== "object") return;
@@ -368,12 +392,22 @@ export async function refreshSaleOrNumbersNow() {
 // Best-effort automatic flushing:
 // - shortly after page load
 // - whenever the browser regains connectivity
+function startSyncQueueSideEffects() {
+  setTimeout(() => {
+    void flushSyncQueue();
+  }, 2000);
+  void pollPulledState();
+  setInterval(() => {
+    void pollPulledState();
+  }, 12000);
+}
+
 if (typeof window !== "undefined") {
-  window.addEventListener("DOMContentLoaded", () => {
-    setTimeout(() => {
-      void flushSyncQueue();
-    }, 2000);
-  });
+  if (document.readyState === "loading") {
+    window.addEventListener("DOMContentLoaded", startSyncQueueSideEffects);
+  } else {
+    startSyncQueueSideEffects();
+  }
   window.addEventListener("online", () => {
     void (async () => {
       await flushSyncQueue();
