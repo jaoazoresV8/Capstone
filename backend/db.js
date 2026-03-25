@@ -140,6 +140,21 @@ function applyBuildDefaults() {
   }
 }
 
+function ensureColumn(table, column, alterSql, label) {
+  try {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+    const hasColumn = (cols || []).some((c) => c.name === column);
+    if (!hasColumn) {
+      db.exec(alterSql);
+      console.log(`[db] Added column ${label}`);
+    }
+  } catch (e) {
+    if (e && !/duplicate column name/i.test(String(e.message))) {
+      console.warn(`[db] Migration ${label}:`, e.message);
+    }
+  }
+}
+
 // Auto-initialize of schema
 const tableCount = db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE type='table'").get();
 if (tableCount.n === 0) {
@@ -264,6 +279,14 @@ if (tableCount.n === 0) {
   ensureChangeLog();
   ensureIdempotencyKeys();
 }
+
+// Keep critical columns available regardless of init path (fresh schema vs existing DB).
+ensureColumn(
+  "products",
+  "recorded_by_name",
+  "ALTER TABLE products ADD COLUMN recorded_by_name TEXT",
+  "products.recorded_by_name"
+);
 
 
 function expandParams(sql, params) {

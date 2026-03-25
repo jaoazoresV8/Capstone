@@ -333,11 +333,17 @@ router.get("/:id", async (req, res) => {
       }
     }
     const [items] = await pool.query(
-      `SELECT si.sale_item_id, si.product_id, p.name AS product_name,
-              si.quantity, si.price, si.subtotal
+      `SELECT
+         si.sale_item_id,
+         si.product_id,
+         COALESCE(NULLIF(TRIM(p.name), ''), 'Product #' || CAST(si.product_id AS TEXT)) AS product_name,
+         si.quantity,
+         si.price,
+         si.subtotal
        FROM sale_items si
-       JOIN products p ON p.product_id = si.product_id
-       WHERE si.sale_id = ? ORDER BY si.sale_item_id`,
+       LEFT JOIN products p ON p.product_id = si.product_id
+       WHERE si.sale_id = ?
+       ORDER BY si.sale_item_id`,
       [req.params.id]
     );
 

@@ -936,7 +936,7 @@ document.addEventListener("input", (e) => {
   }
 });
 
-// Round amount paid to whole pesos on blur (avoid cents; ≥0.50 rounds up)
+// Round amount paid to 2 decimal places on blur (currency cents)
 document.addEventListener("blur", (e) => {
   if (e.target.id !== "sale-amount-paid") return;
   const input = e.target;
@@ -1050,12 +1050,12 @@ function renderSaleItems() {
 }
 
 /**
- * Round to whole pesos: cents >= 0.5 round up, otherwise round down.
+ * Round to money (2 decimal places) to preserve currency cents.
  */
 function roundToWholePeso(value) {
   const n = Number(value);
   if (Number.isNaN(n)) return 0;
-  return Math.round(n);
+  return Math.round(n * 100) / 100;
 }
 
 /**
@@ -1272,7 +1272,7 @@ function submitSale() {
   if (amountReceivedEl) amountReceivedEl.classList.remove("is-invalid");
   if (amountReceivedErrorEl) amountReceivedErrorEl.textContent = "";
 
-  // Round total to whole pesos (cents >= 0.5 round up)
+  // Round total to money (2 decimal places)
   const totalRaw = getSaleTotalRaw();
   const totalRounded = roundToWholePeso(totalRaw);
 
@@ -1730,7 +1730,7 @@ function buildReceiptHtml(sale, displayCustomerName, options = {}) {
   const items = (sale.items || [])
     .map(
       (i) =>
-        `<tr><td class="receipt-desc">${escapeHtml(i.product_name || "")}</td><td class="text-end">${i.quantity}</td><td class="text-end receipt-currency">₱${Number(i.price || 0).toFixed(2)}</td><td class="text-end receipt-currency">₱${Number(i.subtotal || 0).toFixed(2)}</td></tr>`
+        `<tr><td class="receipt-desc">${escapeHtml(i.product_name || i.description || `Product #${i.product_id || ""}`)}</td><td class="text-end">${Number(i.quantity || 0)}</td><td class="text-end receipt-currency">₱${Number(i.price || 0).toFixed(2)}</td><td class="text-end receipt-currency">₱${Number(i.subtotal || 0).toFixed(2)}</td></tr>`
     )
     .join("");
 
@@ -2021,8 +2021,26 @@ async function openReceiptForSale(saleId) {
 // ----- Receipt & Payment history modal (from Sales table) -----
 let receiptHistoryPaymentsCache = null;
 const receiptHistorySnapshots = new Map(); // key: saleId string -> array of snapshots
+const receiptHistorySaleDetailsCache = new Map(); // key: saleId string -> full sale payload including items
 /** When a payment row's preview is showing in the left panel: { saleId, paymentIndex }. Used to show eye-open vs eye-closed icon. */
 let activeReceiptSnapshot = null;
+
+async function getFullSaleForReceiptHistory(saleId) {
+  const key = String(saleId);
+  const cached = receiptHistorySaleDetailsCache.get(key);
+  if (cached && Array.isArray(cached.items)) return cached;
+  const res = await fetch(`${SALES_API}/${encodeURIComponent(saleId)}`, {
+    headers: authHeaders(),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error((data && data.message) || "Failed to load sale details for receipt.");
+  }
+  const sale = data.sale || data;
+  if (!sale) throw new Error("Sale details not found for receipt.");
+  receiptHistorySaleDetailsCache.set(key, sale);
+  return sale;
+}
 
 async function loadAllPaymentsForHistory() {
   try {
@@ -2044,9 +2062,35 @@ function buildPaymentSnapshotsForSale(sale) {
   const saleId = sale?.id;
   if (!saleId) return [];
   const totalAmount = Number(sale.total_amount || 0);
+  const salePaid = Math.max(0, Number(sale.amount_paid || 0));
+  const saleRemaining =
+    sale.remaining_balance != null
+      ? Math.max(0, Number(sale.remaining_balance || 0))
+      : Math.max(0, totalAmount - salePaid);
   const payments =
     (receiptHistoryPaymentsCache || []).filter((p) => Number(p.sale_id) === Number(saleId)) || [];
-  if (!payments.length) return [];
+  if (!payments.length) {
+    // Legacy/central-imported transactions may not have payment rows synced,
+    // while sale totals are still present. Build one synthetic snapshot so
+    // receipt history remains usable for old transactions.
+    if (salePaid > 0) {
+      return [
+        {
+          index: 0,
+          label: "Payment 1 (initial)",
+          date: sale.sale_date
+            ? String(sale.sale_date).replace("T", " ").slice(0, 19)
+            : "—",
+          amountThis: salePaid,
+          cumulativePaid: salePaid,
+          remaining: saleRemaining,
+          method: sale.payment_method || "—",
+          ref: sale.reference_number || "—",
+        },
+      ];
+    }
+    return [];
+  }
 
   const sorted = payments
     .slice()
@@ -2204,34 +2248,41 @@ async function openReceiptHistoryForSale(saleId) {
 
 function previewReceiptSnapshot(saleId, paymentIndex) {
   if (!saleId || paymentIndex == null || Number.isNaN(paymentIndex)) return;
-  const sale = allSales.find((s) => String(s.id) === String(saleId));
-  if (!sale) {
-    openReceiptForSale(saleId);
-    return;
-  }
-  const key = String(saleId);
-  let snapshots = receiptHistorySnapshots.get(key);
-  if (!snapshots || !snapshots.length) {
-    snapshots = buildPaymentSnapshotsForSale(sale);
-    receiptHistorySnapshots.set(key, snapshots);
-  }
-  const snap = snapshots.find((s) => s.index === paymentIndex);
-  if (!snap) {
-    openReceiptForSale(saleId);
-    return;
-  }
+  void (async () => {
+    try {
+      let sale = allSales.find((s) => String(s.id) === String(saleId));
+      if (!sale) {
+        sale = await getFullSaleForReceiptHistory(saleId);
+      }
+      const key = String(saleId);
+      let snapshots = receiptHistorySnapshots.get(key);
+      if (!snapshots || !snapshots.length) {
+        snapshots = buildPaymentSnapshotsForSale(sale);
+        receiptHistorySnapshots.set(key, snapshots);
+      }
+      const snap = snapshots.find((s) => s.index === paymentIndex);
+      if (!snap) {
+        openReceiptForSale(saleId);
+        return;
+      }
 
-  const snapshotSale = {
-    ...sale,
-    amount_paid: snap.cumulativePaid,
-    remaining_balance: snap.remaining,
-  };
-  const customerName = snapshotSale.customer_name || "";
-  showReceiptInRightPanel(snapshotSale, customerName, {
-    amountReceived: snap.amountThis,
-  });
-  activeReceiptSnapshot = { saleId: Number(saleId), paymentIndex };
-  updateReceiptHistoryPreviewIcons();
+      // Always use full sale details so history reprint includes line items.
+      const saleWithItems = await getFullSaleForReceiptHistory(saleId);
+      const snapshotSale = {
+        ...saleWithItems,
+        amount_paid: snap.cumulativePaid,
+        remaining_balance: snap.remaining,
+      };
+      const customerName = snapshotSale.customer_name || "";
+      showReceiptInRightPanel(snapshotSale, customerName, {
+        amountReceived: snap.amountThis,
+      });
+      activeReceiptSnapshot = { saleId: Number(saleId), paymentIndex };
+      updateReceiptHistoryPreviewIcons();
+    } catch (err) {
+      openReceiptForSale(saleId);
+    }
+  })();
 }
 
 /** Update Preview column icons: eye = closed, eye-fill = this row's receipt is shown. */

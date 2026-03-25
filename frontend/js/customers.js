@@ -610,7 +610,9 @@ function renderCustomers(customers) {
     .map(
       (c, i) => {
         const summary = c.products_bought || "—";
-        const hasDetails = ((c.products_detail && c.products_detail.length) || (c.transactions && c.transactions.length));
+        // Always allow opening Details so customer info can be viewed/edited
+        // even when there is no purchase history yet.
+        const hasDetails = true;
         const rowClass = hasBalance(c) ? " customer-with-balance" : "";
         const listStatus = customerListStatusMeta(c);
         const strike = customerListRowStrikethrough(listStatus);

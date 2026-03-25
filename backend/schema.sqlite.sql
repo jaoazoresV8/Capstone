@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS products (
   stock_quantity INTEGER NOT NULL DEFAULT 0,
   recorded_at TEXT DEFAULT (datetime('now','localtime')),
   recorded_by INTEGER,
+  recorded_by_name TEXT,
   FOREIGN KEY (supplier_id) REFERENCES suppliers(supplier_id),
   FOREIGN KEY (recorded_by) REFERENCES users(user_id)
 );

@@ -606,14 +606,40 @@ function startCentralSyncWorker() {
         return;
       }
 
-      const maxId = changes[changes.length - 1].id;
+      const pushResult = await resp.json().catch(() => null);
+      const appliedLocalIds = Array.isArray(pushResult?.applied)
+        ? pushResult.applied
+            .map((a) => Number(a?.localId))
+            .filter((id) => Number.isFinite(id) && id > 0)
+        : [];
+      const failedCount = Array.isArray(pushResult?.failed) ? pushResult.failed.length : 0;
+
+      // Advance only for operations central explicitly applied.
+      // This prevents skipping failed sale pushes (they must be retried).
+      let maxId = lastId;
+      if (appliedLocalIds.length > 0) {
+        maxId = Math.max(...appliedLocalIds);
+      } else if (!pushResult || (pushResult?.success === true && failedCount === 0)) {
+        // Backward-compatible fallback for older central servers without applied[] details.
+        maxId = changes[changes.length - 1].id;
+      } else {
+        if (CENTRAL_SYNC_DEBUG) {
+          console.warn(
+            "[CentralSync] push returned no applied operations; keeping last pushed id at",
+            lastId
+          );
+        }
+        return;
+      }
       await pool.query(
         "INSERT INTO settings (setting_key, setting_value) VALUES ('central_last_pushed_change_id', ?) ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value",
         [String(maxId)]
       );
 
       if (CENTRAL_SYNC_DEBUG) {
-        console.log(`[CentralSync] pushed ${changes.length} change(s), now at id ${maxId}`);
+        console.log(
+          `[CentralSync] pushed batch=${changes.length}, applied=${appliedLocalIds.length || "unknown"}, failed=${failedCount}, now at id ${maxId}`
+        );
       }
     } catch (e) {
       hadError = true;
@@ -756,7 +782,7 @@ async function applyCentralChangeToLocal(change, payload) {
         if (!id) return;
         const name = data.name ?? null;
         const category = data.category ?? null;
-        const supplierId = data.supplier_id ?? null;
+        const supplierIdRaw = data.supplier_id ?? null;
         const supplierPrice = data.supplier_price ?? 0;
         const sellingPrice = data.selling_price ?? 0;
         const stockQty = data.stock_quantity ?? 0;
@@ -766,6 +792,28 @@ async function applyCentralChangeToLocal(change, payload) {
           (typeof data.recorded_by_name === "string" && data.recorded_by_name.trim() !== "")
             ? data.recorded_by_name.trim()
             : null;
+        let supplierId = supplierIdRaw;
+        if (supplierId != null && supplierId !== "") {
+          const sid = Number(supplierId);
+          if (Number.isFinite(sid) && sid > 0) {
+            const [supplierRows] = await pool.query(
+              "SELECT supplier_id FROM suppliers WHERE supplier_id = ? LIMIT 1",
+              [sid]
+            );
+            if (!supplierRows || supplierRows.length === 0) {
+              // Allow product sync even when supplier rows arrive later.
+              await pool.query(
+                "INSERT INTO suppliers (supplier_id, name, contact, address) VALUES (?, ?, NULL, NULL)",
+                [sid, `Supplier #${sid}`]
+              );
+            }
+            supplierId = sid;
+          } else {
+            supplierId = null;
+          }
+        } else {
+          supplierId = null;
+        }
         await pool.query(
           "INSERT INTO products (product_id, name, category, supplier_id, supplier_price, selling_price, stock_quantity, recorded_at, recorded_by, recorded_by_name) " +
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
@@ -1230,6 +1278,18 @@ async function applyCentralChangeToLocal(change, payload) {
             ? String(data.reference_number).trim()
             : null;
         const paymentRef = referenceNumber || payMethod;
+
+        const [saleExists] = await pool.query(
+          "SELECT sale_id FROM sales WHERE sale_id = ? LIMIT 1",
+          [saleId]
+        );
+        if (!saleExists || saleExists.length === 0) {
+          // Tolerate out-of-order pull (payment before sale).
+          await pool.query(
+            "INSERT INTO sales (sale_id, status, sale_date) VALUES (?, 'partial', datetime('now','localtime'))",
+            [saleId]
+          );
+        }
 
         await pool.query(
           "INSERT INTO payments (sale_id, amount_paid, payment_date, reference_number, payment_method) VALUES (?, ?, datetime('now','localtime'), ?, ?)",
