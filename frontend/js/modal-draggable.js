@@ -1,4 +1,5 @@
 (function () {
+  var PREF_ENABLE_MODAL_DRAG_KEY = "sm_pref_enable_modal_drag";
   var DESKTOP_MIN_WIDTH = 768;
   var dragState = null;
   var rafId = null;
@@ -7,6 +8,15 @@
 
   function isDesktop() {
     return window.matchMedia("(min-width: " + DESKTOP_MIN_WIDTH + "px)").matches;
+  }
+
+  function isModalDragEnabled() {
+    try {
+      var raw = localStorage.getItem(PREF_ENABLE_MODAL_DRAG_KEY);
+      return raw == null ? true : raw === "1";
+    } catch (_) {
+      return true;
+    }
   }
 
   /** Remove any leftover modal backdrop/state so inputs and links are never stuck. */
@@ -74,7 +84,7 @@
   }
 
   function initDraggable(modalEl) {
-    if (!isDesktop()) return;
+    if (!isDesktop() || !isModalDragEnabled()) return;
     var dialog = getModalDialog(modalEl);
     var header = getModalHeader(modalEl);
     if (!dialog || !header) return;
@@ -130,6 +140,7 @@
   }
 
   document.addEventListener("shown.bs.modal", function (e) {
+    if (!isModalDragEnabled()) return;
     initDraggable(e.target);
   });
 

@@ -135,6 +135,7 @@ app.get("/api/client-sync-status", async (req, res) => {
   const base = {
     mode: centralUrl ? "central" : "local",
     centralConfigured: Boolean(centralUrl),
+    centralUrl: centralUrl || null,
   };
 
   if (!centralUrl) {
@@ -804,9 +805,22 @@ async function applyCentralChangeToLocal(change, payload) {
         break;
       }
       case "sale": {
-        const id = data.id ?? data.sale_id;
+        const id = data.id ?? data.sale_id ?? change.entity_id;
         const saleId = Number(id);
         if (!Number.isFinite(saleId) || saleId <= 0) break;
+
+        // Central/adminfinal: status-only updates (void/refund) after issue resolution — avoid
+        // recomputing "paid" from balances when payload omits other sale fields.
+        const statusOnly =
+          typeof data.status === "string" &&
+          (data.status.toLowerCase() === "voided" || data.status.toLowerCase() === "refunded");
+        if (op === "update" && statusOnly) {
+          await pool.query("UPDATE sales SET status = ? WHERE sale_id = ?", [
+            data.status.toLowerCase(),
+            saleId,
+          ]);
+          break;
+        }
 
         const customerId =
           data.customer_id != null && data.customer_id !== ""
@@ -855,12 +869,16 @@ async function applyCentralChangeToLocal(change, payload) {
           typeof data.status === "string" && data.status
             ? data.status
             : "unpaid";
+        const statusLower = typeof status === "string" ? status.toLowerCase() : "";
+        const isTerminalIssueStatus = statusLower === "voided" || statusLower === "refunded";
         if (!data.status) {
           if (remainingBalance <= 0 && (totalAmount > 0 || amountPaid > 0)) {
             status = "paid";
           } else if (amountPaid > 0) {
             status = "partial";
           }
+        } else if (isTerminalIssueStatus) {
+          status = statusLower;
         }
 
         const saleDate =
@@ -940,22 +958,58 @@ async function applyCentralChangeToLocal(change, payload) {
           ]
         );
 
-        const items = Array.isArray(data.items) ? data.items : [];
-        await pool.query("DELETE FROM sale_items WHERE sale_id = ?", [saleId]);
-        for (const item of items) {
-          const productId =
-            item.product_id != null && item.product_id !== ""
-              ? Number(item.product_id)
-              : null;
-          if (!Number.isFinite(productId) || productId <= 0) continue;
-          const qty = Number(item.quantity) || 0;
-          const price = Number(item.price) || 0;
-          const subtotal = Number(item.subtotal) || qty * price;
-          if (qty <= 0) continue;
-          await pool.query(
-            "INSERT INTO sale_items (sale_id, product_id, quantity, price, subtotal) VALUES (?, ?, ?, ?, ?)",
-            [saleId, productId, qty, price, subtotal]
+        // Only reconcile line-items when the payload includes them.
+        // For status-only updates (void/refund restore), payload often omits `items`,
+        // and we must not delete existing `sale_items` or the modal will lose prices/subtotals.
+        if (Array.isArray(data.items)) {
+          const items = data.items;
+          // Preserve previous quantities so product stock can be adjusted by delta.
+          const [existingItemRows] = await pool.query(
+            "SELECT product_id, quantity FROM sale_items WHERE sale_id = ?",
+            [saleId]
           );
+          const prevQtyByProduct = new Map();
+          for (const row of existingItemRows || []) {
+            const pid = Number(row.product_id);
+            const qty = Number(row.quantity) || 0;
+            if (!Number.isFinite(pid) || pid <= 0 || qty <= 0) continue;
+            prevQtyByProduct.set(pid, (prevQtyByProduct.get(pid) || 0) + qty);
+          }
+
+          await pool.query("DELETE FROM sale_items WHERE sale_id = ?", [saleId]);
+          const nextQtyByProduct = new Map();
+          for (const item of items) {
+            const productId =
+              item.product_id != null && item.product_id !== ""
+                ? Number(item.product_id)
+                : null;
+            if (!Number.isFinite(productId) || productId <= 0) continue;
+            const qty = Number(item.quantity) || 0;
+            const price = Number(item.price) || 0;
+            const subtotal = Number(item.subtotal) || qty * price;
+            if (qty <= 0) continue;
+            nextQtyByProduct.set(productId, (nextQtyByProduct.get(productId) || 0) + qty);
+            await pool.query(
+              "INSERT INTO sale_items (sale_id, product_id, quantity, price, subtotal) VALUES (?, ?, ?, ?, ?)",
+              [saleId, productId, qty, price, subtotal]
+            );
+          }
+
+          // Stock sync: apply only the quantity delta (new - previous) for this sale.
+          const touched = new Set([
+            ...Array.from(prevQtyByProduct.keys()),
+            ...Array.from(nextQtyByProduct.keys()),
+          ]);
+          for (const productId of touched) {
+            const prevQty = prevQtyByProduct.get(productId) || 0;
+            const nextQty = nextQtyByProduct.get(productId) || 0;
+            const diff = nextQty - prevQty;
+            if (diff === 0) continue;
+            await pool.query(
+              "UPDATE products SET stock_quantity = MAX(0, stock_quantity - ?) WHERE product_id = ?",
+              [diff, productId]
+            );
+          }
         }
 
         // Keep local payments table consistent with central's sale amount_paid.
@@ -1028,6 +1082,78 @@ async function applyCentralChangeToLocal(change, payload) {
           } catch (e) {
             // Non-fatal: sale is already applied, we just couldn't get the OR number from central
           }
+        }
+        break;
+      }
+      case "sale_issue": {
+        // Mirror central sale_issue changes into local sale_issues for customer/sale UIs.
+        // For voided/refunded, also mirror onto local sales.status for badge consistency.
+        const saleId = Number(data.sale_id);
+        const issueId = Number(data.issue_id ?? change.entity_id);
+        if (!Number.isFinite(saleId) || saleId <= 0 || !Number.isFinite(issueId) || issueId <= 0) break;
+
+        const st = String(data.status || "").toLowerCase() || "open";
+
+        const reason = data.reason != null ? String(data.reason) : null;
+        const note = data.note != null ? String(data.note) : null;
+        const cashierId =
+          data.cashier_id != null && data.cashier_id !== ""
+            ? Number(data.cashier_id)
+            : null;
+        const cashierName =
+          data.cashier_name != null ? String(data.cashier_name) : null;
+        const createdAt = data.created_at != null ? String(data.created_at) : null;
+
+        const resolvedByAdminId =
+          data.resolved_by_admin_id != null && data.resolved_by_admin_id !== ""
+            ? Number(data.resolved_by_admin_id)
+            : null;
+        const resolvedByAdminName =
+          data.resolved_by_admin_name != null ? String(data.resolved_by_admin_name) : null;
+        const resolutionNote =
+          data.resolution_note != null ? String(data.resolution_note) : null;
+        const resolutionAction =
+          data.resolution_action != null ? String(data.resolution_action) : null;
+        const resolvedAt = data.resolved_at != null ? String(data.resolved_at) : null;
+
+        // SQLite sale_issues uses issue_id as PK, so we can upsert to keep history consistent.
+        await pool.query(
+          `INSERT INTO sale_issues
+           (issue_id, sale_id, reason, note, status, cashier_id, cashier_name, created_at,
+            resolved_by_admin_id, resolved_by_admin_name, resolution_note, resolution_action, resolved_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(issue_id) DO UPDATE SET
+             sale_id = excluded.sale_id,
+             reason = COALESCE(excluded.reason, reason),
+             note = COALESCE(excluded.note, note),
+             status = excluded.status,
+             cashier_id = COALESCE(excluded.cashier_id, cashier_id),
+             cashier_name = COALESCE(excluded.cashier_name, cashier_name),
+             created_at = COALESCE(excluded.created_at, created_at),
+             resolved_by_admin_id = COALESCE(excluded.resolved_by_admin_id, resolved_by_admin_id),
+             resolved_by_admin_name = COALESCE(excluded.resolved_by_admin_name, resolved_by_admin_name),
+             resolution_note = COALESCE(excluded.resolution_note, resolution_note),
+             resolution_action = COALESCE(excluded.resolution_action, resolution_action),
+             resolved_at = COALESCE(excluded.resolved_at, resolved_at)`,
+          [
+            issueId,
+            saleId,
+            reason,
+            note,
+            st,
+            cashierId,
+            cashierName,
+            createdAt,
+            resolvedByAdminId,
+            resolvedByAdminName,
+            resolutionNote,
+            resolutionAction,
+            resolvedAt,
+          ]
+        );
+
+        if (st === "voided" || st === "refunded") {
+          await pool.query("UPDATE sales SET status = ? WHERE sale_id = ?", [st, saleId]);
         }
         break;
       }
@@ -1220,8 +1346,23 @@ app.get("/.well-known/appspecific/com.chrome.devtools.json", (req, res) => {
 });
 
 // Serve static files
-app.use("/js", express.static(path.join(frontendDir, "js")));
-app.use("/css", express.static(path.join(frontendDir, "css")));
+app.use(
+  "/js",
+  (req, res, next) => {
+    // Electron can keep renderer cache between runs; force fresh JS.
+    res.setHeader("Cache-Control", "no-store, max-age=0");
+    next();
+  },
+  express.static(path.join(frontendDir, "js"))
+);
+app.use(
+  "/css",
+  (req, res, next) => {
+    res.setHeader("Cache-Control", "no-store, max-age=0");
+    next();
+  },
+  express.static(path.join(frontendDir, "css"))
+);
 app.use(express.static(frontendDir));
 
 // Expose select vendor libraries (e.g. Chart.js) from node_modules

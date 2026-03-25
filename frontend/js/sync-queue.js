@@ -170,14 +170,37 @@ export async function flushSyncQueue() {
         break;
       }
 
-      // On success, drop the batch and continue with remaining operations.
-      queue = queue.slice(batch.length);
+      // On success, drop only operations that central confirms as applied.
+      // This prevents one bad operation from permanently blocking the queue.
+      const appliedLocalIds = new Set(
+        Array.isArray(data?.applied)
+          ? data.applied
+              .map((a) => (a && a.localId ? String(a.localId) : ""))
+              .filter(Boolean)
+          : []
+      );
+      if (appliedLocalIds.size > 0) {
+        queue = queue.filter((op) => !appliedLocalIds.has(String(op?.localId || "")));
+      } else {
+        // Backward compatibility for older central responses.
+        queue = queue.slice(batch.length);
+      }
       saveQueue(queue);
+
+      // If nothing from this batch was applied, avoid a tight loop.
+      if (appliedLocalIds.size === 0) {
+        console.warn("Sync push returned no applied operations; keeping queue for retry.");
+        break;
+      }
     }
 
     // If we flushed everything, resolve receipt_no -> central OR number and update local sales.
     if (!queue.length) {
       await reconcileLocalSaleOrNumbers();
+      // Notify active pages (sales/reports/dashboard) to refresh from latest synced data.
+      if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+        window.dispatchEvent(new CustomEvent("central:refresh", { bubbles: true }));
+      }
     }
   } catch (err) {
     console.error("Sync flush error:", err);

@@ -1,5 +1,5 @@
 import express from "express";
-import pool, { tableHasColumn } from "../db.js";
+import pool, { tableHasColumn, getTableColumns } from "../db.js";
 import { authenticateToken } from "../middleware/authMiddleware.js";
 import { logChange } from "../changeLog.js";
 import { sendMail } from "../utils/mailer.js";
@@ -20,6 +20,15 @@ function escapeHtml(s) {
 function formatMoneyPhp(n) {
   const v = Number(n || 0);
   return `₱${v.toFixed(2)}`;
+}
+
+async function hasSaleIssuesTable() {
+  try {
+    const cols = getTableColumns("sale_issues");
+    return Array.isArray(cols) && cols.length > 0;
+  } catch {
+    return false;
+  }
 }
 
 async function loadLatestSaleForCustomer(customerId) {
@@ -126,6 +135,7 @@ router.get("/", async (req, res) => {
     const q = (req.query.q || "").trim();
     const hasSalesCustomerName = tableHasColumn("sales", "customer_name");
     const hasSalesContactAddress = tableHasColumn("sales", "customer_contact") && tableHasColumn("sales", "customer_address");
+    const hasOrNumber = tableHasColumn("sales", "or_number");
 
     let customersFromTable = [];
     let customersFromSales = [];
@@ -252,13 +262,41 @@ router.get("/", async (req, res) => {
     });
 
     const [detailRows] = await pool.query(
-      `SELECT s.customer_id, s.customer_name, s.sale_id, s.sale_date, s.total_amount, s.amount_paid, s.remaining_balance, s.status,
+      `SELECT s.customer_id, s.customer_name, s.sale_id, ${hasOrNumber ? "s.or_number AS or_number" : "NULL AS or_number"}, s.sale_date, s.total_amount, s.amount_paid, s.remaining_balance, s.status,
               p.name AS product_name, si.quantity, si.price, si.subtotal
        FROM sale_items si
        JOIN sales s ON si.sale_id = s.sale_id
        JOIN products p ON si.product_id = p.product_id
        ORDER BY s.sale_date DESC, s.sale_id DESC`
     );
+
+    let issueStatusBySale = {};
+    const issuesEnabled = await hasSaleIssuesTable();
+    if (issuesEnabled && Array.isArray(detailRows) && detailRows.length > 0) {
+      const saleIds = Array.from(
+        new Set(
+          detailRows
+            .map((r) => r.sale_id)
+            .filter((id) => id != null)
+        )
+      );
+      if (saleIds.length) {
+        const [issueRows] = await pool.query(
+          `SELECT sale_id, status
+           FROM sale_issues
+           WHERE sale_id IN (?)
+           ORDER BY datetime(created_at) DESC, issue_id DESC`,
+          [saleIds]
+        );
+        for (const row of issueRows || []) {
+          if (!row || row.sale_id == null) continue;
+          const s = String(row.status || "").toLowerCase();
+          if (!issueStatusBySale[row.sale_id] && (s === "voided" || s === "refunded")) {
+            issueStatusBySale[row.sale_id] = s;
+          }
+        }
+      }
+    }
 
     const key = (row) => row.customer_id != null ? `id:${row.customer_id}` : `name:${(row.customer_name || "").trim().toLowerCase()}`;
     const byCustomer = {};
@@ -273,13 +311,16 @@ router.get("/", async (req, res) => {
       }
       const sid = row.sale_id;
       if (!byCustomer[k].transactions[sid]) {
+        const mergedStatus = issueStatusBySale[sid] || row.status;
         byCustomer[k].transactions[sid] = {
           sale_id: sid,
+          or_number: row.or_number || null,
           sale_date: row.sale_date,
           total_amount: row.total_amount,
           amount_paid: row.amount_paid,
           remaining_balance: row.remaining_balance,
-          status: row.status,
+          status: mergedStatus,
+          issue_resolution_status: issueStatusBySale[sid] || null,
           items: [],
         };
       }

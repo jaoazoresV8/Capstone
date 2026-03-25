@@ -34,6 +34,181 @@ function clearAlert() {
   if (el) el.classList.add("d-none");
 }
 
+function promptTextInput({ title, defaultValue = "", placeholder = "" } = {}) {
+  const modalWrapperId = "categoryPromptModalWrapper";
+  const modalId = "categoryPromptModal";
+  const inputId = "categoryPromptInput";
+  const okBtnId = "categoryPromptOkBtn";
+  const cancelBtnId = "categoryPromptCancelBtn";
+
+  return new Promise((resolve) => {
+    // Inject styles once per page for a consistent, polished modal look.
+    const STYLE_ID = "dmCategoryPromptModalStyles";
+    if (!document.getElementById(STYLE_ID)) {
+      const styleEl = document.createElement("style");
+      styleEl.id = STYLE_ID;
+      styleEl.textContent = `
+#categoryPromptModalWrapper .dm-category-prompt-content {
+  border-radius: 16px;
+  border: 1px solid rgba(13,110,253,0.25);
+  box-shadow: 0 18px 45px rgba(2,6,23,0.28);
+  overflow: hidden;
+}
+#categoryPromptModalWrapper .dm-category-prompt-header {
+  background: linear-gradient(135deg, rgba(13,110,253,1) 0%, rgba(79,70,229,1) 100%);
+  color: #fff;
+  border-bottom: 1px solid rgba(255,255,255,0.18);
+  padding: 0.75rem 1rem;
+}
+#categoryPromptModalWrapper .dm-category-prompt-header .modal-title {
+  font-weight: 800;
+  letter-spacing: 0.01em;
+}
+#categoryPromptModalWrapper .dm-category-prompt-close.btn-close {
+  filter: brightness(100);
+  opacity: 0.95;
+}
+#categoryPromptModalWrapper .dm-category-prompt-body {
+  padding: 1rem;
+}
+#categoryPromptModalWrapper .dm-category-prompt-help {
+  margin-bottom: 0.65rem;
+  color: rgba(15,23,42,0.62);
+}
+#categoryPromptModalWrapper .dm-category-prompt-input {
+  border-radius: 12px;
+  border: 1px solid rgba(148,163,184,0.75);
+  padding: 0.6rem 0.85rem;
+  background: rgba(248,250,252,1);
+}
+#categoryPromptModalWrapper .dm-category-prompt-input:focus {
+  border-color: rgba(13,110,253,0.65);
+  box-shadow: 0 0 0 0.25rem rgba(13,110,253,0.18);
+  background: #fff;
+}
+#categoryPromptModalWrapper .dm-category-prompt-ok {
+  border-radius: 12px;
+  font-weight: 700;
+  padding: 0.55rem 0.95rem;
+}
+#categoryPromptModalWrapper .dm-category-prompt-cancel {
+  border-radius: 12px;
+  padding: 0.55rem 0.95rem;
+}
+#categoryPromptModalWrapper .dm-category-prompt-modal.show .modal-dialog {
+  animation: dmCategoryPromptIn 180ms cubic-bezier(0.2, 0.9, 0.2, 1);
+}
+@keyframes dmCategoryPromptIn {
+  from { opacity: 0; transform: translateY(10px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+`;
+      document.head.appendChild(styleEl);
+    }
+
+    let wrapper = document.getElementById(modalWrapperId);
+    if (!wrapper || !wrapper.querySelector(".dm-category-prompt-content")) {
+      if (!wrapper) {
+        wrapper = document.createElement("div");
+        wrapper.id = modalWrapperId;
+      }
+      wrapper.innerHTML = `
+        <div class="modal fade dm-category-prompt-modal" id="${modalId}" tabindex="-1" aria-hidden="true">
+          <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content dm-category-prompt-content">
+              <div class="modal-header dm-category-prompt-header">
+                <h5 class="modal-title" id="categoryPromptModalLabel">
+                  <i class="bi bi-tags-fill me-2"></i>
+                  <span>Input</span>
+                </h5>
+                <button type="button" class="dm-category-prompt-close btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+              </div>
+              <div class="modal-body dm-category-prompt-body">
+                <div class="dm-category-prompt-help small">Type a category name and press <b>Enter</b>.</div>
+                <input
+                  type="text"
+                  class="form-control dm-category-prompt-input"
+                  id="${inputId}"
+                  autocomplete="off"
+                  placeholder="${placeholder}"
+                />
+              </div>
+              <div class="modal-footer" style="justify-content: flex-end; padding: 0.85rem 1rem;">
+                <button type="button" class="btn btn-outline-secondary dm-category-prompt-cancel" data-bs-dismiss="modal" id="${cancelBtnId}">Cancel</button>
+                <button type="button" class="btn btn-primary dm-category-prompt-ok" id="${okBtnId}">OK</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+      if (!wrapper.parentNode) document.body.appendChild(wrapper);
+    }
+
+    const modalEl = document.getElementById(modalId);
+    if (!modalEl) return resolve(null);
+
+    const labelEl = document.getElementById("categoryPromptModalLabel");
+    const inputEl = document.getElementById(inputId);
+    const okBtn = document.getElementById(okBtnId);
+    const cancelBtn = document.getElementById(cancelBtnId);
+    if (!labelEl || !inputEl || !okBtn || !cancelBtn) return resolve(null);
+
+    const labelTextEl = labelEl.querySelector("span") || labelEl;
+    labelTextEl.textContent = title || "Input";
+    inputEl.placeholder = placeholder || "";
+    inputEl.value = defaultValue || "";
+
+    // Focus after modal is attached/visible
+    try {
+      inputEl.focus();
+      inputEl.select?.();
+    } catch {}
+
+    const modal = new bootstrap.Modal(modalEl, { backdrop: "static" });
+    let settled = false;
+    const settle = (v) => {
+      if (settled) return;
+      settled = true;
+      resolve(v);
+    };
+
+    const onOk = () => {
+      const v = String(inputEl.value || "").trim();
+      modal.hide();
+      settle(v || null);
+    };
+    const onCancel = () => {
+      modal.hide();
+      settle(null);
+    };
+
+    const updateOkDisabled = () => {
+      const v = String(inputEl.value || "").trim();
+      okBtn.disabled = v.length === 0;
+    };
+    updateOkDisabled();
+
+    okBtn.onclick = onOk;
+    cancelBtn.onclick = onCancel;
+    okBtn.disabled = okBtn.disabled || false;
+    inputEl.oninput = updateOkDisabled;
+    inputEl.onkeydown = (e) => {
+      if (e.key === "Enter") okBtn.click();
+      if (e.key === "Escape") cancelBtn.click();
+    };
+
+    modalEl.addEventListener(
+      "hidden.bs.modal",
+      () => {
+        if (!settled) settle(null);
+      },
+      { once: true }
+    );
+
+    modal.show();
+  });
+}
+
 const PRODUCTS_PAGE_SIZE = 20;
 
 let allProducts = []; 
@@ -227,8 +402,11 @@ function appendProductRows(products) {
   const fragment = visibleProducts
     .map((p) => {
       const hasSupplier = p.supplier_id != null;
+      const stockQty = Number(p.stock_quantity ?? 0);
+      const isLowStock = stockQty <= 10;
+      const reorderBtnClass = isLowStock ? "btn-outline-danger" : "btn-outline-warning";
       const reorderBtn = hasSupplier
-        ? `<button type="button" class="btn btn-outline-warning btn-sm" data-action="reorder-product" data-product-id="${p.id}" title="Reorder via email to supplier"><i class="bi bi-arrow-repeat"></i></button>`
+        ? `<button type="button" class="btn ${reorderBtnClass} btn-sm" data-action="reorder-product" data-product-id="${p.id}" title="Reorder via email to supplier"><i class="bi bi-arrow-repeat"></i></button>`
         : "";
       const supplierCell = hasSupplier
         ? `<span class="d-inline-flex align-items-center gap-1">
@@ -286,8 +464,11 @@ function renderProducts(products) {
       (p) => {
         const supplierName = p.supplier_name || "—";
         const hasSupplier = p.supplier_id != null;
+        const stockQty = Number(p.stock_quantity ?? 0);
+        const isLowStock = stockQty <= 10;
+        const reorderBtnClass = isLowStock ? "btn-outline-danger" : "btn-outline-warning";
         const reorderBtn = hasSupplier
-          ? `<button type="button" class="btn btn-outline-warning btn-sm" data-action="reorder-product" data-product-id="${p.id}" title="Reorder via email to supplier"><i class="bi bi-arrow-repeat"></i></button>`
+          ? `<button type="button" class="btn ${reorderBtnClass} btn-sm" data-action="reorder-product" data-product-id="${p.id}" title="Reorder via email to supplier"><i class="bi bi-arrow-repeat"></i></button>`
           : "";
         const supplierCell = hasSupplier
           ? `<span class="d-inline-flex align-items-center gap-1">
@@ -921,6 +1102,112 @@ document.addEventListener("mousedown", (e) => {
     return;
   }
 });
+
+// Capture-phase handler for category modal buttons.
+// Some Electron/pjax scenarios can prevent the bubble-phase delegation from firing.
+document.addEventListener(
+  "click",
+  (e) => {
+    const addBtn = e.target.closest("#btn-product-add-category");
+    if (addBtn) {
+      e.preventDefault();
+      e.stopPropagation();
+
+      if (!isCurrentUserAdmin()) {
+        showAlert("Only admins can add new categories.", "warning");
+        return;
+      }
+      promptTextInput({ title: "Enter new product category name:" })
+        .then((name) => {
+          const n = String(name || "").trim();
+          if (!n) return;
+
+          if (productCategories.some((c) => c.toLowerCase() === n.toLowerCase())) {
+            setProductCategoryValue(n);
+            showAlert("Category already exists; selected for new products.", "info");
+            return;
+          }
+          productCategories.push(n);
+          productCategories.sort((a, b) => a.localeCompare(b));
+          setProductCategoryValue(n);
+          showAlert(`Category added: ${n}`, "success");
+        })
+        .catch(() => {});
+      return;
+    }
+
+    const editBtn = e.target.closest("#btn-product-edit-category");
+    if (editBtn) {
+      e.preventDefault();
+      e.stopPropagation();
+
+      if (!isCurrentUserAdmin()) {
+        showAlert("Only admins can rename categories.", "warning");
+        return;
+      }
+      const select = document.getElementById("product-category");
+      if (!select) return;
+      const current = (select.value || "").trim();
+      if (!current) {
+        showAlert("Select a category to rename.", "warning");
+        return;
+      }
+      promptTextInput({ title: "Rename category:", defaultValue: current })
+        .then((name) => {
+          const n = String(name || "").trim();
+          if (!n || n === current) return;
+
+          const exists = productCategories.some((c) => c.toLowerCase() === n.toLowerCase());
+          if (exists && n.toLowerCase() !== current.toLowerCase()) {
+            showAlert("A category with that name already exists.", "warning");
+            return;
+          }
+          productCategories = productCategories.map((c) => (c === current ? n : c));
+          productCategories.sort((a, b) => a.localeCompare(b));
+          setProductCategoryValue(n);
+          showAlert(
+            "Category renamed for new products. Existing products keep their saved category.",
+            "info"
+          );
+        })
+        .catch(() => {});
+      return;
+    }
+
+    const archiveBtn = e.target.closest("#btn-product-archive-category");
+    if (archiveBtn) {
+      e.preventDefault();
+      e.stopPropagation();
+
+      if (!isCurrentUserAdmin()) {
+        showAlert("Only admins can archive categories.", "warning");
+        return;
+      }
+      const select = document.getElementById("product-category");
+      if (!select) return;
+      const current = (select.value || "").trim();
+      if (!current) {
+        showAlert("Select a category to archive.", "warning");
+        return;
+      }
+      if (
+        !window.confirm(
+          `Archive category "${current}"?\n\nExisting products will keep this category, but it will no longer be available for new products.`
+        )
+      ) {
+        return;
+      }
+      productCategories = productCategories.filter((c) => c !== current);
+      setProductCategoryValue("");
+      showAlert(
+        "Category archived. Existing products keep this category, but it is no longer available for new products.",
+        "success"
+      );
+      return;
+    }
+  },
+  true
+);
 document.addEventListener("click", (e) => {
   if (e.target.closest("#product-supplier-autocomplete")) {
     return;
@@ -954,15 +1241,21 @@ document.addEventListener("click", (e) => {
       showAlert("Only admins can add new categories.", "warning");
       return;
     }
-    const name = (window.prompt("Enter new product category name:") || "").trim();
-    if (!name) return;
-    if (productCategories.some((c) => c.toLowerCase() === name.toLowerCase())) {
-      setProductCategoryValue(name);
-      return;
-    }
-    productCategories.push(name);
-    productCategories.sort((a, b) => a.localeCompare(b));
-    setProductCategoryValue(name);
+    promptTextInput({ title: "Enter new product category name:" })
+      .then((name) => {
+        const n = String(name || "").trim();
+        if (!n) return;
+        if (productCategories.some((c) => c.toLowerCase() === n.toLowerCase())) {
+          setProductCategoryValue(n);
+          showAlert("Category already exists; selected for new products.", "info");
+          return;
+        }
+        productCategories.push(n);
+        productCategories.sort((a, b) => a.localeCompare(b));
+        setProductCategoryValue(n);
+        showAlert(`Category added: ${n}`, "success");
+      })
+      .catch(() => {});
     return;
   }
   if (e.target.closest("#btn-product-edit-category")) {
@@ -977,17 +1270,25 @@ document.addEventListener("click", (e) => {
       showAlert("Select a category to rename.", "warning");
       return;
     }
-    const name = (window.prompt("Rename category:", current) || "").trim();
-    if (!name || name === current) return;
-    const exists = productCategories.some((c) => c.toLowerCase() === name.toLowerCase());
-    if (exists && name.toLowerCase() !== current.toLowerCase()) {
-      showAlert("A category with that name already exists.", "warning");
-      return;
-    }
-    productCategories = productCategories.map((c) => (c === current ? name : c));
-    productCategories.sort((a, b) => a.localeCompare(b));
-    setProductCategoryValue(name);
-    showAlert("Category renamed for new products. Existing products keep their saved category.", "info");
+    promptTextInput({ title: "Rename category:", defaultValue: current })
+      .then((name) => {
+        const n = String(name || "").trim();
+        if (!n || n === current) return;
+
+        const exists = productCategories.some((c) => c.toLowerCase() === n.toLowerCase());
+        if (exists && n.toLowerCase() !== current.toLowerCase()) {
+          showAlert("A category with that name already exists.", "warning");
+          return;
+        }
+        productCategories = productCategories.map((c) => (c === current ? n : c));
+        productCategories.sort((a, b) => a.localeCompare(b));
+        setProductCategoryValue(n);
+        showAlert(
+          "Category renamed for new products. Existing products keep their saved category.",
+          "info"
+        );
+      })
+      .catch(() => {});
     return;
   }
   if (e.target.closest("#btn-product-archive-category")) {

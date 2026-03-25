@@ -1,4 +1,5 @@
 import express from "express";
+import bcrypt from "bcryptjs";
 import pool, { getTableColumns } from "../db.js";
 import { authenticateToken, requireAdmin } from "../middleware/authMiddleware.js";
 import { logChange } from "../changeLog.js";
@@ -99,6 +100,7 @@ router.get("/", async (req, res) => {
     const hasTransactionType = columns.includes("transaction_type");
     const hasCustomerName = columns.includes("customer_name");
     const hasOrNumber = columns.includes("or_number");
+    const hasSaleUuid = columns.includes("sale_uuid");
     const hasIssues = hasSaleIssuesTable();
 
     const q = String(req.query.q || "").trim();
@@ -146,13 +148,15 @@ router.get("/", async (req, res) => {
                 s.total_amount, s.amount_paid, s.remaining_balance, s.status,
                 s.sale_date, ${hasTransactionType ? "s.transaction_type" : "NULL AS transaction_type"},
                 ${hasOrNumber ? "s.or_number" : "NULL AS or_number"},
+                ${hasSaleUuid ? "s.sale_uuid" : "NULL AS sale_uuid"},
                 s.customer_name AS walk_in_customer_name
          FROM sales s
          LEFT JOIN customers c ON c.customer_id = s.customer_id`
       : `SELECT s.sale_id AS id, s.customer_id, c.name AS customer_name,
                 s.total_amount, s.amount_paid, s.remaining_balance, s.status,
                 s.sale_date, NULL AS transaction_type, NULL AS walk_in_customer_name,
-                ${hasOrNumber ? "s.or_number" : "NULL AS or_number"}
+                ${hasOrNumber ? "s.or_number" : "NULL AS or_number"},
+                ${hasSaleUuid ? "s.sale_uuid" : "NULL AS sale_uuid"}
          FROM sales s
          LEFT JOIN customers c ON c.customer_id = s.customer_id`;
 
@@ -232,14 +236,20 @@ router.get("/", async (req, res) => {
       }
     }
 
-    const salesWithMethod = rows.map((r) => ({
-      ...r,
-      customer_name: r.customer_name || r.walk_in_customer_name || "—",
-      payment_method: payBySale[r.id] || "cash",
-      reference_number: refBySale[r.id] ?? null,
-      has_open_issue: hasIssues ? Boolean(openIssuesBySale[r.id]) : false,
-      issue_resolution_status: hasIssues ? (issueResolutionBySale[r.id] || null) : null,
-    }));
+    const salesWithMethod = rows.map((r) => {
+      const st = String(r.status || "").toLowerCase();
+      const fromIssues = hasIssues ? issueResolutionBySale[r.id] || null : null;
+      const fromSaleRow =
+        st === "voided" || st === "refunded" ? st : null;
+      return {
+        ...r,
+        customer_name: r.customer_name || r.walk_in_customer_name || "—",
+        payment_method: payBySale[r.id] || "cash",
+        reference_number: refBySale[r.id] ?? null,
+        has_open_issue: hasIssues ? Boolean(openIssuesBySale[r.id]) : false,
+        issue_resolution_status: fromIssues || fromSaleRow,
+      };
+    });
 
     return res.json({
       sales: salesWithMethod,
@@ -274,6 +284,7 @@ router.get("/:id", async (req, res) => {
     const hasTransactionType = columns.includes("transaction_type");
     const hasCustomerName = columns.includes("customer_name");
     const hasOrNumber = columns.includes("or_number");
+    const hasSaleUuid = columns.includes("sale_uuid");
     const hasIssues = hasSaleIssuesTable();
     
     let query;
@@ -281,6 +292,7 @@ router.get("/:id", async (req, res) => {
       query = `SELECT s.sale_id AS id, s.customer_id, COALESCE(c.name, s.customer_name) AS customer_name, 
                       c.contact, c.address, s.customer_name AS walk_in_customer_name,
                       ${hasOrNumber ? "s.or_number" : "NULL AS or_number"},
+                      ${hasSaleUuid ? "s.sale_uuid" : "NULL AS sale_uuid"},
                       s.total_amount, s.amount_paid, s.remaining_balance, s.status,
                       s.sale_date, ${hasTransactionType ? "s.transaction_type" : "NULL AS transaction_type"}
                FROM sales s
@@ -290,6 +302,7 @@ router.get("/:id", async (req, res) => {
       query = `SELECT s.sale_id AS id, s.customer_id, c.name AS customer_name, 
                       c.contact, c.address, NULL AS walk_in_customer_name,
                       ${hasOrNumber ? "s.or_number" : "NULL AS or_number"},
+                      ${hasSaleUuid ? "s.sale_uuid" : "NULL AS sale_uuid"},
                       s.total_amount, s.amount_paid, s.remaining_balance, s.status,
                       s.sale_date, NULL AS transaction_type
                FROM sales s
@@ -329,15 +342,30 @@ router.get("/:id", async (req, res) => {
     );
 
     let has_open_issue = false;
+    let issue_resolution_status = null;
     if (hasIssues) {
       const [openIssues] = await pool.query(
         "SELECT 1 FROM sale_issues WHERE sale_id = ? AND status = 'open' LIMIT 1",
         [req.params.id]
       );
       has_open_issue = openIssues.length > 0;
+      const [resRows] = await pool.query(
+        `SELECT status FROM sale_issues
+         WHERE sale_id = ? AND status IN ('voided','refunded')
+         ORDER BY resolved_at DESC, issue_id DESC
+         LIMIT 1`,
+        [req.params.id]
+      );
+      if (resRows && resRows.length > 0) {
+        issue_resolution_status = resRows[0].status;
+      }
     }
 
     const paymentRefDisplay = payRows && payRows.length > 0 ? (payRows[0].reference_number || null) : null;
+    const rowSt = String(sales[0].status || "").toLowerCase();
+    const issueResOut =
+      issue_resolution_status ||
+      (rowSt === "voided" || rowSt === "refunded" ? rowSt : null);
     const sale = {
       ...sales[0],
       customer_name: sales[0].customer_name || sales[0].walk_in_customer_name || "—",
@@ -345,6 +373,7 @@ router.get("/:id", async (req, res) => {
       reference_number: paymentRefDisplay,
       items,
       has_open_issue,
+      issue_resolution_status: issueResOut,
     };
     return res.json({ sale });
   } catch (err) {
@@ -368,8 +397,15 @@ router.post("/", async (req, res) => {
       customer_contact,
       customer_address,
       receipt_number,
+      sale_uuid: bodySaleUuid,
+      saleUuid: bodySaleUuidAlt,
     } = req.body;
     const referenceNumber = (bodyRef != null && String(bodyRef).trim()) ? String(bodyRef).trim() : null;
+    const saleUuidRaw = bodySaleUuid != null ? bodySaleUuid : bodySaleUuidAlt;
+    const saleUuidForDb =
+      saleUuidRaw != null && String(saleUuidRaw).trim()
+        ? String(saleUuidRaw).trim()
+        : null;
     const contact = customer_contact != null
       ? (typeof customer_contact === "number" ? String(customer_contact) : (typeof customer_contact === "string" ? customer_contact.trim() : null))
       : null;
@@ -384,6 +420,7 @@ router.post("/", async (req, res) => {
     const hasTransactionType = columns.includes("transaction_type");
     const hasCustomerName = columns.includes("customer_name");
     const hasOrNumber = columns.includes("or_number");
+    const hasSaleUuid = columns.includes("sale_uuid");
     const hasSalesContactAddress = columns.includes("customer_contact") && columns.includes("customer_address");
     const hasNewColumns = hasTransactionType && hasCustomerName;
     
@@ -512,6 +549,13 @@ router.post("/", async (req, res) => {
     const [saleResult] = await conn.query(insertQuery, insertValues);
     const saleId = saleResult.insertId;
 
+    if (hasSaleUuid && saleUuidForDb) {
+      await conn.query("UPDATE sales SET sale_uuid = ? WHERE sale_id = ?", [
+        saleUuidForDb,
+        saleId,
+      ]);
+    }
+
     for (const it of lineItems) {
       await conn.query(
         "INSERT INTO sale_items (sale_id, product_id, quantity, price, subtotal) VALUES (?, ?, ?, ?, ?)",
@@ -570,6 +614,7 @@ router.post("/", async (req, res) => {
       selectQuery = `SELECT s.sale_id AS id, s.customer_id, COALESCE(c.name, s.customer_name) AS customer_name,
                             s.customer_name AS walk_in_customer_name, ${hasTransactionType ? 's.transaction_type' : 'NULL AS transaction_type'},
                             ${hasOrNumber ? 's.or_number' : 'NULL AS or_number'},
+                            ${hasSaleUuid ? 's.sale_uuid' : 'NULL AS sale_uuid'},
                             s.total_amount, s.amount_paid, s.remaining_balance, s.status,
                             s.sale_date,
                             c.contact AS customer_contact,
@@ -580,6 +625,7 @@ router.post("/", async (req, res) => {
       selectQuery = `SELECT s.sale_id AS id, s.customer_id, c.name AS customer_name,
                             NULL AS walk_in_customer_name, NULL AS transaction_type,
                             ${hasOrNumber ? 's.or_number' : 'NULL AS or_number'},
+                            ${hasSaleUuid ? 's.sale_uuid' : 'NULL AS sale_uuid'},
                             s.total_amount, s.amount_paid, s.remaining_balance, s.status,
                             s.sale_date,
                             c.contact AS customer_contact,
@@ -780,6 +826,12 @@ router.put("/:id/issues/:issueId", requireAdmin, async (req, res) => {
       ]
     );
 
+    // Keep sales.status aligned with void/refund so customer aggregates and GET /sales/:id match list badges.
+    if (newStatus === "voided" || newStatus === "refunded") {
+      await pool.query("UPDATE sales SET status = ? WHERE sale_id = ?", [newStatus, saleId]);
+      await logChange("sale", saleId, "update", { sale_id: saleId, status: newStatus });
+    }
+
     const [rows] = await pool.query(
       `SELECT issue_id, sale_id, reason, note, status, cashier_id, cashier_name,
               created_at, resolved_by_admin_id, resolved_by_admin_name,
@@ -796,6 +848,122 @@ router.put("/:id/issues/:issueId", requireAdmin, async (req, res) => {
   } catch (err) {
     console.error("PUT /api/sales/:id/issues/:issueId:", err);
     return res.status(500).json({ message: "Failed to update sale issue." });
+  }
+});
+
+// PUT /api/sales/:id/restore-status - restore a void/refund sale back to paid/unpaid.
+// This endpoint is intentionally NOT requireAdmin-token-only; it verifies the admin password instead,
+// so staff can restore without switching accounts.
+router.put("/:id/restore-status", async (req, res) => {
+  try {
+    const saleId = parseInt(req.params.id, 10);
+    const { status, admin_password: adminPassword } = req.body || {};
+
+    if (!saleId || Number.isNaN(saleId) || saleId <= 0) {
+      return res.status(400).json({ message: "Invalid sale ID." });
+    }
+    const desiredStatus =
+      typeof status === "string" && ["paid", "unpaid"].includes(status.toLowerCase())
+        ? status.toLowerCase()
+        : null;
+    if (!desiredStatus) {
+      return res.status(400).json({ message: "status must be 'paid' or 'unpaid'." });
+    }
+    if (typeof adminPassword !== "string" || !adminPassword.trim()) {
+      return res.status(400).json({ message: "Admin password is required." });
+    }
+
+    // Verify admin password (any account with role=admin).
+    const [adminRows] = await pool.query(
+      "SELECT user_id, name, username, password_hash FROM users WHERE role = 'admin' LIMIT 1",
+      []
+    );
+    const adminRow = Array.isArray(adminRows) && adminRows.length ? adminRows[0] : null;
+    if (!adminRow || !adminRow.password_hash) {
+      return res.status(500).json({ message: "Admin account is not configured." });
+    }
+
+    const ok = await bcrypt.compare(String(adminPassword).trim(), adminRow.password_hash);
+    if (!ok) {
+      return res.status(401).json({ message: "Invalid admin password." });
+    }
+
+    const [saleRows] = await pool.query(
+      "SELECT sale_id, customer_id, total_amount, amount_paid, remaining_balance FROM sales WHERE sale_id = ? LIMIT 1",
+      [saleId]
+    );
+    if (!saleRows || saleRows.length === 0) {
+      return res.status(404).json({ message: "Sale not found." });
+    }
+    const sale = saleRows[0];
+    const totalAmount = Number(sale.total_amount) || 0;
+    const customerId = sale.customer_id != null ? Number(sale.customer_id) || null : null;
+    const oldRemaining = Number(sale.remaining_balance) || 0;
+
+    const newAmountPaid = desiredStatus === "paid" ? totalAmount : 0;
+    const newRemaining = desiredStatus === "paid" ? 0 : totalAmount;
+
+    await pool.query(
+      "UPDATE sales SET amount_paid = ?, remaining_balance = ?, status = ? WHERE sale_id = ?",
+      [newAmountPaid, newRemaining, desiredStatus, saleId]
+    );
+
+    if (customerId && Number.isFinite(customerId) && customerId > 0) {
+      await pool.query(
+        "UPDATE customers SET total_balance = total_balance - ? + ? WHERE customer_id = ?",
+        [oldRemaining, newRemaining, customerId]
+      );
+    }
+
+    // If there is a last void/refund issue record, mark it resolved so the UI stops treating it as void/refund.
+    let restoredIssue = null;
+    if (hasSaleIssuesTable()) {
+      const [issueRows] = await pool.query(
+        "SELECT issue_id, status FROM sale_issues WHERE sale_id = ? AND status IN ('voided','refunded') ORDER BY issue_id DESC LIMIT 1",
+        [saleId]
+      );
+      if (issueRows && issueRows.length) {
+        const issue = issueRows[0];
+        const restoredFrom = String(issue.status || "").toLowerCase();
+        const resolutionNote = `Restored from ${restoredFrom} back to ${desiredStatus}.`;
+        await pool.query(
+          `UPDATE sale_issues
+           SET status = 'resolved',
+               resolution_note = ?,
+               resolution_action = 'resolved',
+               resolved_by_admin_id = ?,
+               resolved_by_admin_name = ?,
+               resolved_at = datetime('now','localtime')
+           WHERE issue_id = ?`,
+          [resolutionNote, adminRow.user_id, adminRow.name || adminRow.username || null, issue.issue_id]
+        );
+        restoredIssue = { issue_id: issue.issue_id, restoredFrom, desiredStatus };
+      }
+    }
+
+    // Log for sync: update sale + (if exists) sale_issue.
+    await logChange("sale", saleId, "update", {
+      sale_id: saleId,
+      status: desiredStatus,
+      total_amount: totalAmount,
+      amount_paid: newAmountPaid,
+      remaining_balance: newRemaining,
+      customer_id: customerId,
+    });
+
+    if (restoredIssue && restoredIssue.issue_id) {
+      await logChange("sale_issue", restoredIssue.issue_id, "update", {
+        issue_id: restoredIssue.issue_id,
+        sale_id: saleId,
+        status: "resolved",
+        resolution_action: "resolved",
+      });
+    }
+
+    return res.json({ message: `Sale restored to ${desiredStatus}.` });
+  } catch (err) {
+    console.error("PUT /api/sales/:id/restore-status:", err);
+    return res.status(500).json({ message: "Failed to restore sale status." });
   }
 });
 

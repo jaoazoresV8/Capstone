@@ -1,6 +1,4 @@
-
 import { API_ORIGIN } from "./config.js";
-import { enqueueSyncOperation, getSaleUuidForLocalId } from "./sync-queue.js";
 const PAYMENTS_API = `${API_ORIGIN}/api/sales/payments`;
 const SALES_API = `${API_ORIGIN}/api/sales`;
 
@@ -528,25 +526,7 @@ document.addEventListener("click", function (e) {
         // will appear in the sale's receipt history when opening Sales.
       }
 
-      // Queue payment sync operation so central can update balances.
-      try {
-        const saleUuid = getSaleUuidForLocalId(saleIdToUse);
-        enqueueSyncOperation({
-          entityType: "payment",
-          operation: "create",
-          entityId: saleIdToUse,
-          localId: null,
-          data: {
-            sale_id: saleIdToUse,
-            sale_uuid: saleUuid || undefined,
-            amount_paid: amountRounded,
-            payment_method: paymentMethod,
-            reference_number: referenceNumber || undefined,
-          },
-        });
-      } catch (_) {
-        // Ignore queue errors; local payment has already been recorded.
-      }
+      // Payment sync: backend logChange + startCentralSyncWorker (same as sales — avoid duplicate push).
     })
     .catch(function (err) {
       alert(err.message || "Failed to record payment.");

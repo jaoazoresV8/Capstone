@@ -63,6 +63,9 @@ const SORT_OPTIONS = {
   stock_desc: "p.stock_quantity DESC",
 };
 
+// Must match `adminfinal/backend/routes/productRoutes.js` placeholder naming.
+const CATEGORY_PLACEHOLDER_PREFIX = "__dm_category__:";
+
 router.get("/", async (req, res) => {
   try {
     const q = (req.query.q || "").trim();
@@ -78,6 +81,10 @@ router.get("/", async (req, res) => {
                LEFT JOIN suppliers s ON s.supplier_id = p.supplier_id
                LEFT JOIN users u ON u.user_id = p.recorded_by WHERE 1=1`;
     const params = [];
+
+    // Hide placeholder products that exist only to carry category values.
+    sql += " AND p.name NOT LIKE ?";
+    params.push(`${CATEGORY_PLACEHOLDER_PREFIX}%`);
     if (q) {
       sql += " AND (p.name LIKE ? OR p.category LIKE ? OR s.name LIKE ?)";
       params.push(`%${q}%`, `%${q}%`, `%${q}%`);
@@ -95,6 +102,7 @@ router.get("/", async (req, res) => {
     const countParams = [...params];
     let countSql = `SELECT COUNT(*) AS total FROM products p
       LEFT JOIN suppliers s ON s.supplier_id = p.supplier_id WHERE 1=1`;
+    countSql += " AND p.name NOT LIKE ?";
     if (q) {
       countSql += " AND (p.name LIKE ? OR p.category LIKE ? OR s.name LIKE ?)";
     }

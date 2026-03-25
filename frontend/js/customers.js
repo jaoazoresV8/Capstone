@@ -25,10 +25,12 @@ let lastRenderedCustomers = [];
 let currentCustomerDetails = null;
 const saleDetailsCache = {};
 let pendingCustomerSaleConfirm = null;
+let pendingCustomerSaleRestore = { saleId: null, verified: false };
 let notifyAllPhoneOnly = [];
 let notifyAllPhoneOnlyCursor = 0;
 
 const SALES_API = `${API_ORIGIN}/api/sales`;
+const ADMIN_VERIFY_API = `${API_ORIGIN}/api/auth/admin/verify-password`;
 
 function normalizePhoneInput(val) {
   const digits = String(val || "").replace(/\\D/g, "");
@@ -188,8 +190,25 @@ async function updateCustomerBasicInfo() {
   }
 }
 
+function flashMessageInCustomerDetailsModal(message, variant) {
+  const modal = document.getElementById("customerDetailsModal");
+  const body = modal?.querySelector(".modal-body");
+  if (!body || !message) return;
+  const el = document.createElement("div");
+  el.className = `alert alert-${variant === "success" ? "success" : "danger"} py-2 small mb-2 customer-issue-flash`;
+  el.setAttribute("role", "status");
+  el.textContent = message;
+  body.prepend(el);
+  setTimeout(() => el.remove(), 8000);
+}
+
+/**
+ * @returns {Promise<{ ok: boolean; message: string }>}
+ */
 async function ensureAndResolveIssueForSale(saleId, kind) {
-  if (!isAdmin()) return;
+  if (!isAdmin()) {
+    return { ok: false, message: "Only admins can update sale issues." };
+  }
   const kindSafe = kind === "void" ? "void" : kind === "refund" ? "refund" : "resolved";
   // 1) Load existing issues
   let issueId = null;
@@ -228,8 +247,7 @@ async function ensureAndResolveIssueForSale(saleId, kind) {
   }
 
   if (!issueId) {
-    alert("Could not create or find an issue for this sale.");
-    return;
+    return { ok: false, message: "Could not create or find an issue for this sale." };
   }
 
   // 3) Resolve the issue with the chosen action
@@ -254,12 +272,11 @@ async function ensureAndResolveIssueForSale(saleId, kind) {
     );
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      alert(data.message || "Failed to update sale issue.");
-      return;
+      return { ok: false, message: data.message || "Failed to update sale issue." };
     }
-    alert(`Sale #${saleId} marked as ${status}.`);
+    return { ok: true, message: `Sale #${saleId} marked as ${status}.` };
   } catch (err) {
-    alert(err.message || "Failed to update sale issue.");
+    return { ok: false, message: err.message || "Failed to update sale issue." };
   }
 }
 
@@ -347,6 +364,43 @@ function scheduleCustomersFilter() {
   }, 350);
 }
 
+/** Match Sales list / GET sale: void/refund from issues wins, then sales.status. */
+function effectiveCustomerTransactionStatus(t) {
+  const issueRes = String(t.issue_resolution_status || "").toLowerCase();
+  if (issueRes === "voided" || issueRes === "refunded") return issueRes;
+  const st = String(t.status || "").toLowerCase();
+  if (st === "voided" || st === "refunded") return st;
+  return st;
+}
+
+/** Customers table Status column: balance first, then any void/refund in history, else Paid. */
+function customerListStatusMeta(c) {
+  const balanceRounded = Math.round(Number(c.total_balance || 0) * 100) / 100;
+  if (balanceRounded > 0) {
+    return { label: "With balance", className: "text-danger fw-medium" };
+  }
+  const txs = c.transactions || [];
+  let hasVoid = false;
+  let hasRefund = false;
+  for (const t of txs) {
+    const s = effectiveCustomerTransactionStatus(t);
+    if (s === "voided") hasVoid = true;
+    if (s === "refunded") hasRefund = true;
+  }
+  if (hasVoid && hasRefund) {
+    return { label: "Void / Refunded", className: "text-secondary fw-medium" };
+  }
+  if (hasVoid) return { label: "Void", className: "text-secondary fw-medium" };
+  if (hasRefund) return { label: "Refunded", className: "text-info fw-medium" };
+  return { label: "Paid", className: "text-success" };
+}
+
+/** Strikethrough main table row when customer row status is void/refund (not “paid”). */
+function customerListRowStrikethrough(meta) {
+  const L = meta && meta.label;
+  return L === "Void" || L === "Void / Refunded" || L === "Refunded";
+}
+
 function buildDetailsHtml(c) {
   const products = (c.products_detail || []);
   const transactions = (c.transactions || []);
@@ -390,7 +444,7 @@ function buildDetailsHtml(c) {
     html += '<div class="detail-section-title">Transaction history (most recent first)</div>';
     transactions.forEach((t) => {
       const dateStr = t.sale_date ? new Date(t.sale_date).toLocaleDateString(undefined, { dateStyle: "short" }) : "—";
-      const rawStatus = (t.status || "").toLowerCase();
+      const rawStatus = effectiveCustomerTransactionStatus(t);
       let statusLabel = "—";
       let statusClass = "badge bg-secondary-subtle text-secondary";
       if (rawStatus === "paid") {
@@ -409,13 +463,17 @@ function buildDetailsHtml(c) {
         statusLabel = "Refunded";
         statusClass = "badge bg-info-subtle text-info";
       }
+      const showRestore = rawStatus === "voided" || rawStatus === "refunded";
+      const restoreIcon = showRestore
+        ? `<button type="button" class="btn btn-link btn-sm p-0 ms-2 text-secondary" data-action="customer-sale-restore" data-sale-id="${t.sale_id}" title="Restore status"><i class="bi bi-arrow-counterclockwise"></i></button>`
+        : "";
       html += '<div class="transaction-card">';
       html += '<div class="transaction-header">';
-      html += `<span class="sale-id">Sale #${escapeHtml(String(t.sale_id))}</span>`;
+      html += `<span class="sale-id">Sale #${escapeHtml(String(t.or_number || t.sale_id))}</span>`;
       html += `<span class="text-muted">${escapeHtml(dateStr)}</span>`;
       html += `<span>Total ₱${Number(t.total_amount || 0).toFixed(2)}</span>`;
       html += `<span>Paid ₱${Number(t.amount_paid || 0).toFixed(2)}</span>`;
-      html += `<span class="ms-2" data-sale-status-label="${t.sale_id}"><span class="${statusClass}">${escapeHtml(statusLabel)}</span></span>`;
+      html += `<span class="ms-2" data-sale-status-label="${t.sale_id}"><span class="${statusClass}">${escapeHtml(statusLabel)}</span></span>${restoreIcon}`;
       html += `<span class="ms-2 small text-muted" data-sale-payment-label="${t.sale_id}">Payment: <span class="fw-semibold">—</span></span>`;
       // Issue actions are only shown when the related sale is flagged (has an open issue).
       html += `<div class="ms-auto d-flex gap-1 customer-sale-actions d-none" data-sale-id="${t.sale_id}">`;
@@ -463,9 +521,12 @@ async function updateCustomerSaleIssueButtons(container) {
       }
 
       const statusEl = root.querySelector(`[data-sale-status-label="${saleId}"]`);
-      if (statusEl && sale.status) {
-        const raw = String(sale.status).toLowerCase();
-        let label = sale.status;
+      const raw = effectiveCustomerTransactionStatus({
+        issue_resolution_status: sale.issue_resolution_status,
+        status: sale.status,
+      });
+      if (statusEl && raw) {
+        let label = raw;
         let cls = "badge bg-secondary-subtle text-secondary";
         if (raw === "paid") {
           label = "Paid";
@@ -532,7 +593,7 @@ function openCustomerSaleConfirmModal(saleId, kind) {
     paymentEl.textContent = pmLabel;
   }
   pendingCustomerSaleConfirm = { saleId, kind };
-  const m = new bootstrap.Modal(modalEl);
+  const m = bootstrap.Modal.getOrCreateInstance(modalEl, { backdrop: true, keyboard: true });
   m.show();
 }
 
@@ -544,8 +605,6 @@ function renderCustomers(customers) {
   const balance = (c) => Number(c.total_balance || 0);
   const balanceRounded = (c) => Math.round(balance(c) * 100) / 100;
   const hasBalance = (c) => balanceRounded(c) > 0;
-  const statusText = (c) => (hasBalance(c) ? "With balance" : "Paid");
-  const statusClass = (c) => (hasBalance(c) ? "text-danger fw-medium" : "text-success");
 
   tbody.innerHTML = customers
     .map(
@@ -553,6 +612,12 @@ function renderCustomers(customers) {
         const summary = c.products_bought || "—";
         const hasDetails = ((c.products_detail && c.products_detail.length) || (c.transactions && c.transactions.length));
         const rowClass = hasBalance(c) ? " customer-with-balance" : "";
+        const listStatus = customerListStatusMeta(c);
+        const strike = customerListRowStrikethrough(listStatus);
+        const tdCls = (extra) => {
+          const parts = [extra, strike ? "text-decoration-line-through" : null].filter(Boolean);
+          return parts.length ? ` class="${parts.join(" ")}"` : "";
+        };
         const bal = balance(c);
         const firstUnpaid = (c.transactions || []).find((t) => Number(t.remaining_balance || 0) > 0);
         const saleId = firstUnpaid ? firstUnpaid.sale_id : "";
@@ -570,12 +635,12 @@ function renderCustomers(customers) {
             ? `<div class="d-inline-flex gap-1 justify-content-end">${detailsBtn}${payBtn}</div>`
             : "";
         return `<tr data-customer-row data-index="${i}" class="${rowClass}">
-          <td>${escapeHtml(c.name || "—")}</td>
-          <td>${escapeHtml(c.contact || "—")}</td>
-          <td>${escapeHtml(c.address || "—")}</td>
-          <td class="small">${escapeHtml(summary)}</td>
-          <td>₱${balanceRounded(c).toFixed(2)}</td>
-          <td><span class="${statusClass(c)}">${escapeHtml(statusText(c))}</span></td>
+          <td${tdCls()}>${escapeHtml(c.name || "—")}</td>
+          <td${tdCls()}>${escapeHtml(c.contact || "—")}</td>
+          <td${tdCls()}>${escapeHtml(c.address || "—")}</td>
+          <td${tdCls("small")}>${escapeHtml(summary)}</td>
+          <td${tdCls()}>₱${balanceRounded(c).toFixed(2)}</td>
+          <td${tdCls()}><span class="${listStatus.className}">${escapeHtml(listStatus.label)}</span></td>
           <td class="text-end">${actions}</td>
         </tr>`;
       }
@@ -595,7 +660,7 @@ document.addEventListener("change", (e) => {
   }
 });
 
-document.addEventListener("click", (e) => {
+document.addEventListener("click", async (e) => {
   const notifyAllBtn = e.target.closest("#btn-notify-balance-all");
   if (notifyAllBtn) {
     e.preventDefault();
@@ -617,13 +682,13 @@ document.addEventListener("click", (e) => {
     if (!customer) return;
     currentCustomerDetails = customer;
     const modalEl = document.getElementById("customerDetailsModal");
-    const bodyEl = document.getElementById("customer-details-body");
+    const bodyEl = modalEl?.querySelector(".modal-body");
     const titleEl = document.getElementById("customerDetailsModalLabel");
     if (!modalEl || !bodyEl || !titleEl) return;
     titleEl.textContent = customer.name || "Customer details";
     bodyEl.innerHTML = buildDetailsHtml(customer);
     updateCustomerSaleIssueButtons(bodyEl);
-    const m = new bootstrap.Modal(modalEl);
+    const m = bootstrap.Modal.getOrCreateInstance(modalEl);
     m.show();
     return;
   }
@@ -631,6 +696,152 @@ document.addEventListener("click", (e) => {
   if (saveBtn) {
     e.preventDefault();
     updateCustomerBasicInfo();
+    return;
+  }
+  const restoreIconBtn = e.target.closest("[data-action='customer-sale-restore']");
+  if (restoreIconBtn) {
+    e.preventDefault();
+    const saleId = restoreIconBtn.getAttribute("data-sale-id");
+    if (!saleId) return;
+    pendingCustomerSaleRestore = { saleId, verified: false };
+
+    const modalEl = document.getElementById("customerSaleRestoreModal");
+    const passEl = document.getElementById("customer-sale-restore-password");
+    const alertEl = document.getElementById("customer-sale-restore-alert");
+    const saleLabelEl = document.getElementById("customer-sale-restore-sale-label");
+    const verifyBtn = document.getElementById("customer-sale-restore-verify");
+    const paidBtn = document.getElementById("customer-sale-restore-paid");
+    const unpaidBtn = document.getElementById("customer-sale-restore-unpaid");
+
+    if (modalEl) {
+      if (passEl) passEl.value = "";
+      if (alertEl) {
+        alertEl.classList.add("d-none");
+        alertEl.textContent = "";
+      }
+      if (saleLabelEl) saleLabelEl.textContent = `Sale #${saleId}`;
+      if (verifyBtn) verifyBtn.classList.remove("d-none");
+      if (paidBtn) paidBtn.classList.add("d-none");
+      if (unpaidBtn) unpaidBtn.classList.add("d-none");
+
+      const m = bootstrap.Modal.getOrCreateInstance(modalEl, { backdrop: true, keyboard: true });
+      m.show();
+    }
+    return;
+  }
+  const verifyRestoreBtn = e.target.closest("#customer-sale-restore-verify");
+  if (verifyRestoreBtn && pendingCustomerSaleRestore?.saleId) {
+    e.preventDefault();
+    const modalEl = document.getElementById("customerSaleRestoreModal");
+    const passEl = document.getElementById("customer-sale-restore-password");
+    const alertEl = document.getElementById("customer-sale-restore-alert");
+    const paidBtn = document.getElementById("customer-sale-restore-paid");
+    const unpaidBtn = document.getElementById("customer-sale-restore-unpaid");
+    const verifyBtn = document.getElementById("customer-sale-restore-verify");
+    const saleId = pendingCustomerSaleRestore.saleId;
+    if (!modalEl || !passEl) return;
+
+    const adminPassword = passEl.value;
+    try {
+      const r = await fetch(ADMIN_VERIFY_API, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ admin_password: adminPassword }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.message || "Invalid admin password.");
+
+      pendingCustomerSaleRestore.verified = true;
+      if (alertEl) {
+        alertEl.className = "alert alert-success py-2 small d-none";
+        alertEl.textContent = "";
+      }
+      if (verifyBtn) verifyBtn.classList.add("d-none");
+      if (paidBtn) paidBtn.classList.remove("d-none");
+      if (unpaidBtn) unpaidBtn.classList.remove("d-none");
+    } catch (err) {
+      if (alertEl) {
+        alertEl.className = "alert alert-danger py-2 small";
+        alertEl.textContent = err.message || "Failed to verify password.";
+        alertEl.classList.remove("d-none");
+      }
+    }
+    return;
+  }
+  const restorePaidBtn = e.target.closest("#customer-sale-restore-paid");
+  const restoreUnpaidBtn = e.target.closest("#customer-sale-restore-unpaid");
+  if ((restorePaidBtn || restoreUnpaidBtn) && pendingCustomerSaleRestore?.saleId) {
+    e.preventDefault();
+    const saleId = pendingCustomerSaleRestore.saleId;
+    if (!pendingCustomerSaleRestore.verified) {
+      const alertEl = document.getElementById("customer-sale-restore-alert");
+      if (alertEl) {
+        alertEl.className = "alert alert-danger py-2 small";
+        alertEl.textContent = "Verify admin password first.";
+        alertEl.classList.remove("d-none");
+      }
+      return;
+    }
+    const passEl = document.getElementById("customer-sale-restore-password");
+    const alertEl = document.getElementById("customer-sale-restore-alert");
+    if (!passEl) return;
+    const adminPassword = passEl.value;
+    const desiredStatus = restorePaidBtn ? "paid" : "unpaid";
+    try {
+      const r = await fetch(`${SALES_API}/${encodeURIComponent(saleId)}/restore-status`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ status: desiredStatus, admin_password: adminPassword }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.message || "Failed to restore sale.");
+
+      // Update modal details for the sale if currently open, without wiping the edit form.
+      if (currentCustomerDetails && Array.isArray(currentCustomerDetails.transactions)) {
+        try {
+          // Preserve any unsaved edits currently typed into the modal inputs.
+          const nameInput = document.getElementById("customer-detail-name");
+          const contactInput = document.getElementById("customer-detail-contact");
+          const addressInput = document.getElementById("customer-detail-address");
+          if (nameInput) currentCustomerDetails.name = nameInput.value;
+          if (contactInput) currentCustomerDetails.contact = contactInput.value;
+          if (addressInput) currentCustomerDetails.address = addressInput.value;
+
+          const tx = currentCustomerDetails.transactions.find((t) => String(t.sale_id) === String(saleId));
+          if (tx) {
+            const total = Number(tx.total_amount || 0);
+            tx.status = desiredStatus;
+            // Once restored to paid/unpaid, it should no longer be considered void/refunded.
+            tx.issue_resolution_status = null;
+            tx.amount_paid = desiredStatus === "paid" ? total : 0;
+            tx.remaining_balance = desiredStatus === "paid" ? 0 : total;
+          }
+
+          const modalEl = document.getElementById("customerDetailsModal");
+          const bodyEl = modalEl?.querySelector(".modal-body");
+          if (modalEl && bodyEl) {
+            bodyEl.innerHTML = buildDetailsHtml(currentCustomerDetails);
+            updateCustomerSaleIssueButtons(bodyEl);
+          }
+        } catch (_) {}
+      }
+
+      // Close restore modal.
+      const modalEl = document.getElementById("customerSaleRestoreModal");
+      if (modalEl) {
+        const m = bootstrap.Modal.getInstance(modalEl);
+        if (m) m.hide();
+      }
+      pendingCustomerSaleRestore = { saleId: null, verified: false };
+      // Also refresh the list so totals/status stay correct.
+      loadCustomers({ ...getCustomersParams() });
+    } catch (err) {
+      if (alertEl) {
+        alertEl.className = "alert alert-danger py-2 small";
+        alertEl.textContent = err.message || "Failed to restore sale.";
+        alertEl.classList.remove("d-none");
+      }
+    }
     return;
   }
   const saleActionBtn = e.target.closest("[data-action='customer-sale-mark']");
@@ -647,12 +858,24 @@ document.addEventListener("click", (e) => {
     if (pendingCustomerSaleConfirm && pendingCustomerSaleConfirm.saleId) {
       const { saleId, kind } = pendingCustomerSaleConfirm;
       pendingCustomerSaleConfirm = null;
-      ensureAndResolveIssueForSale(saleId, kind);
-      const modalEl = document.getElementById("customerSaleConfirmModal");
-      if (modalEl) {
-        const m = bootstrap.Modal.getInstance(modalEl);
-        if (m) m.hide();
+      const confirmModalEl = document.getElementById("customerSaleConfirmModal");
+      if (confirmModalEl) {
+        const cm = bootstrap.Modal.getInstance(confirmModalEl);
+        if (cm) cm.hide();
       }
+      void (async () => {
+        const result = await ensureAndResolveIssueForSale(saleId, kind);
+        const detailsModal = document.getElementById("customerDetailsModal");
+        const bodyEl = detailsModal?.querySelector(".modal-body");
+        if (result.ok) {
+          delete saleDetailsCache[saleId];
+          if (bodyEl) await updateCustomerSaleIssueButtons(bodyEl);
+          loadCustomers({ ...getCustomersParams() });
+          flashMessageInCustomerDetailsModal(result.message, "success");
+        } else {
+          flashMessageInCustomerDetailsModal(result.message, "danger");
+        }
+      })();
     }
     return;
   }

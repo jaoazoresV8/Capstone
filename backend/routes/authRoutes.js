@@ -307,6 +307,35 @@ router.post("/forgot-password", forgotLimiter, async (req, res) => {
   }
 });
 
+// POST /api/auth/admin/verify-password
+// Lightweight password gate for sensitive admin actions from staff UI.
+router.post("/admin/verify-password", authenticateToken, async (req, res) => {
+  try {
+    const adminPassword = req.body?.admin_password ?? req.body?.password ?? "";
+    if (typeof adminPassword !== "string" || !adminPassword.trim()) {
+      return res.status(400).json({ message: "Admin password is required." });
+    }
+
+    const [rows] = await pool.query(
+      "SELECT user_id, name, username, password_hash FROM users WHERE role = 'admin'",
+      []
+    );
+    const admins = Array.isArray(rows) ? rows : [];
+
+    for (const row of admins) {
+      if (!row?.password_hash) continue;
+      // eslint-disable-next-line no-await-in-loop
+      const ok = await bcrypt.compare(String(adminPassword).trim(), row.password_hash);
+      if (ok) return res.json({ ok: true });
+    }
+
+    return res.status(401).json({ message: "Invalid admin password." });
+  } catch (err) {
+    console.error("POST /api/auth/admin/verify-password:", err);
+    return res.status(500).json({ message: "Failed to verify admin password." });
+  }
+});
+
 
 router.get("/me", authenticateToken, async (req, res) => {
   try {

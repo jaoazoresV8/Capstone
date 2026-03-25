@@ -154,6 +154,18 @@
     '          <div class="form-text">Leave empty to run in local-only mode.</div>' +
     '          <div id="central-url-feedback" class="small mt-1"></div>' +
     '        </div>' +
+    '        <div class="nav-settings-sep my-2" aria-hidden="true"><span class="nav-settings-sep-dot"></span><span class="nav-settings-sep-dot"></span><span class="nav-settings-sep-dot"></span></div>' +
+    '        <div class="mb-1">' +
+    '          <label class="form-label small mb-1 text-muted">Preferences</label>' +
+    '          <div class="form-check form-switch">' +
+    '            <input class="form-check-input" type="checkbox" id="settings-enable-modal-draggable" checked />' +
+    '            <label class="form-check-label small" for="settings-enable-modal-draggable">Enable modal draggable</label>' +
+    '          </div>' +
+    '          <div class="form-check form-switch">' +
+    '            <input class="form-check-input" type="checkbox" id="settings-allow-hotkeys" checked />' +
+    '            <label class="form-check-label small" for="settings-allow-hotkeys">Allow hotkeys</label>' +
+    '          </div>' +
+    '        </div>' +
     '      </div>' +
     '      <div class="modal-footer py-2">' +
     '        <button type="button" class="btn btn-outline-primary btn-sm" id="btn-test-central-connection" tabindex="3"><i class="bi bi-activity me-1"></i> Test connection</button>' +
@@ -166,6 +178,28 @@
 
   var el = document.getElementById("app-nav");
   if (el) el.innerHTML = html;
+
+  function syncNavHeightVar() {
+    try {
+      var nav = document.querySelector(".app-navbar");
+      if (!nav || !document.documentElement || !document.documentElement.style) return;
+      var h = Math.ceil(nav.getBoundingClientRect().height || nav.offsetHeight || 60);
+      if (h > 0) {
+        document.documentElement.style.setProperty("--dm-nav-height", h + "px");
+        var main = document.querySelector(".app-main");
+        if (main && main.style) {
+          // Hard fallback for browser-refresh timing races:
+          // enforce effective top offset even before all CSS/layout settles.
+          main.style.paddingTop = (h + 24) + "px";
+        }
+      }
+    } catch (_) {}
+  }
+  syncNavHeightVar();
+  if (typeof window !== "undefined") {
+    window.addEventListener("load", syncNavHeightVar, { once: true });
+    window.addEventListener("resize", syncNavHeightVar);
+  }
 
   // Prevent "UI moves up" on browser refresh: set scroll behavior as early as possible
   // (before main content parses) so the browser never restores or shows wrong scroll.

@@ -8,6 +8,8 @@ const SETTINGS_API = `${API_ORIGIN}/api/settings`;
 const DASHBOARD_API = `${API_ORIGIN}/api/dashboard/overview`;
 const SYNC_STATUS_API = `${API_ORIGIN}/api/client-sync-status`;
 const SYNC_CLIENT_CHECK_API = `${API_ORIGIN}/api/sync/clients/check-id`;
+const PREF_ALLOW_HOTKEYS_KEY = "sm_pref_allow_hotkeys";
+const PREF_ENABLE_MODAL_DRAG_KEY = "sm_pref_enable_modal_drag";
 
 function escapeHtml(s) {
   if (s == null) return "";
@@ -81,6 +83,70 @@ function initOpenInAppOrWebLink() {
 function getAuthHeaders() {
   const token = localStorage.getItem("sm_token");
   return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+function getUiPrefs() {
+  const allowHotkeysRaw = localStorage.getItem(PREF_ALLOW_HOTKEYS_KEY);
+  const enableModalDragRaw = localStorage.getItem(PREF_ENABLE_MODAL_DRAG_KEY);
+  return {
+    allowHotkeys: allowHotkeysRaw == null ? true : allowHotkeysRaw === "1",
+    enableModalDrag: enableModalDragRaw == null ? true : enableModalDragRaw === "1",
+  };
+}
+
+function saveUiPrefs({ allowHotkeys, enableModalDrag }) {
+  if (allowHotkeys != null) {
+    localStorage.setItem(PREF_ALLOW_HOTKEYS_KEY, allowHotkeys ? "1" : "0");
+  }
+  if (enableModalDrag != null) {
+    localStorage.setItem(PREF_ENABLE_MODAL_DRAG_KEY, enableModalDrag ? "1" : "0");
+  }
+  window.dispatchEvent(new CustomEvent("app:preferences-changed", { bubbles: true }));
+
+  // Best-effort persistence to the app's SQLite-backed settings (so builds can
+  // bake the values and other computers can seed them).
+  try {
+    persistUiPrefsToServer({ allowHotkeys, enableModalDrag });
+  } catch (_) {}
+}
+
+async function persistUiPrefsToServer({ allowHotkeys, enableModalDrag }) {
+  try {
+    await fetch(SETTINGS_API, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+      body: JSON.stringify({
+        pref_allow_hotkeys: allowHotkeys ? 1 : 0,
+        pref_enable_modal_drag: enableModalDrag ? 1 : 0,
+      }),
+    });
+  } catch (_) {
+    // Preferences are still applied locally even if server persistence fails.
+  }
+}
+
+function bindUiPreferenceAutoSave() {
+  document.addEventListener("change", (e) => {
+    const toggle = e.target;
+    if (!toggle) return;
+    const isHotkeys = toggle.id === "settings-allow-hotkeys";
+    const isModalDrag = toggle.id === "settings-enable-modal-draggable";
+    if (!isHotkeys && !isModalDrag) return;
+
+    const allowHotkeysEl = document.getElementById("settings-allow-hotkeys");
+    const enableModalDragEl = document.getElementById("settings-enable-modal-draggable");
+    saveUiPrefs({
+      allowHotkeys: allowHotkeysEl ? !!allowHotkeysEl.checked : true,
+      enableModalDrag: enableModalDragEl ? !!enableModalDragEl.checked : true,
+    });
+
+    const appAlert = document.getElementById("app-settings-alert");
+    if (appAlert) {
+      appAlert.textContent = "Preference updated.";
+      appAlert.className = "alert alert-success py-1 small";
+      appAlert.classList.remove("d-none");
+    }
+  });
 }
 
 async function fetchWithTimeout(resource, options = {}, timeoutMs = 5000) {
@@ -158,6 +224,8 @@ async function loadAppSettings() {
   const feedback = document.getElementById("client-id-feedback");
   const centralFeedback = document.getElementById("central-url-feedback");
   const appAlert = document.getElementById("app-settings-alert");
+  const allowHotkeysEl = document.getElementById("settings-allow-hotkeys");
+  const enableModalDragEl = document.getElementById("settings-enable-modal-draggable");
   if (!input) return;
   if (feedback) {
     feedback.textContent = "";
@@ -181,8 +249,42 @@ async function loadAppSettings() {
     if (typeof data.central_api_url === "string") {
       setCentralAddressUIFromUrl(data.central_api_url);
     }
+    if (data && data.pref_allow_hotkeys != null) {
+      try {
+        localStorage.setItem(PREF_ALLOW_HOTKEYS_KEY, data.pref_allow_hotkeys ? "1" : "0");
+      } catch (_) {}
+    }
+    if (data && data.pref_enable_modal_drag != null) {
+      try {
+        localStorage.setItem(PREF_ENABLE_MODAL_DRAG_KEY, data.pref_enable_modal_drag ? "1" : "0");
+      } catch (_) {}
+    }
   } catch {
     // ignore
+  }
+  try {
+    const prefs = getUiPrefs();
+    if (allowHotkeysEl) allowHotkeysEl.checked = !!prefs.allowHotkeys;
+    if (enableModalDragEl) enableModalDragEl.checked = !!prefs.enableModalDrag;
+  } catch {
+    // ignore localStorage preference read issues
+  }
+}
+
+async function seedUiPrefsFromServer() {
+  try {
+    const res = await fetch(SETTINGS_API, { headers: getAuthHeaders() });
+    if (!res.ok) return;
+    const data = await res.json().catch(() => ({}));
+    if (data && data.pref_allow_hotkeys != null) {
+      localStorage.setItem(PREF_ALLOW_HOTKEYS_KEY, data.pref_allow_hotkeys ? "1" : "0");
+    }
+    if (data && data.pref_enable_modal_drag != null) {
+      localStorage.setItem(PREF_ENABLE_MODAL_DRAG_KEY, data.pref_enable_modal_drag ? "1" : "0");
+    }
+    window.dispatchEvent(new CustomEvent("app:preferences-changed", { bubbles: true }));
+  } catch (_) {
+    // Ignore seeding failures; defaults remain enabled.
   }
 }
 
@@ -374,6 +476,7 @@ function initNavRefreshButton() {
   btn.dataset.bound = "1";
   btn.addEventListener("click", (e) => {
     e.preventDefault();
+    window.dispatchEvent(new CustomEvent("central:refresh", { bubbles: true }));
     window.dispatchEvent(new CustomEvent("app:refresh", { bubbles: true }));
   });
 }
@@ -464,6 +567,7 @@ function initGlobalSlashSearchShortcut() {
 function initClientIdSettingsModal() {
   // Central address: segmented IPv4 input (dots are separators, not editable characters)
   bindCentralIpv4Behavior();
+  bindUiPreferenceAutoSave();
 
   document.addEventListener("click", async (e) => {
     const openBtn = e.target.closest("#btn-open-app-settings");
@@ -483,6 +587,8 @@ function initClientIdSettingsModal() {
     const input = document.getElementById("settings-client-id");
     const feedback = document.getElementById("client-id-feedback");
     const centralFeedback = document.getElementById("central-url-feedback");
+    const allowHotkeysEl = document.getElementById("settings-allow-hotkeys");
+    const enableModalDragEl = document.getElementById("settings-enable-modal-draggable");
     if (!input) return;
     const cid = String(input.value || "").trim();
     if (!cid) {
@@ -523,9 +629,46 @@ function initClientIdSettingsModal() {
     }
 
     try {
-      // Save settings without blocking on central Client ID checks.
-      // Connectivity and ID uniqueness can be verified separately using
-      // the "Test connection" button.
+      // Enforce Client ID uniqueness against central before saving.
+      // Duplicate IDs can cause sync identity collisions across branches.
+      if (centralParsed.url) {
+        const checkParams = new URLSearchParams({
+          clientId: cid,
+          centralUrl: centralParsed.url,
+        });
+        const checkRes = await fetch(
+          `${SYNC_CLIENT_CHECK_API}?${checkParams.toString()}`,
+          { headers: getAuthHeaders() }
+        );
+        const checkData = await checkRes.json().catch(() => ({}));
+        if (!checkRes.ok) {
+          const checkMsg =
+            checkData.message ||
+            "Could not verify Client ID with central. Check connection and try again.";
+          if (feedback) {
+            feedback.textContent = checkMsg;
+            feedback.className = "small mt-2 text-danger";
+          }
+          if (centralFeedback) {
+            centralFeedback.textContent = checkMsg;
+            centralFeedback.className = "small mt-1 text-danger";
+          }
+          return;
+        }
+        if (checkData && checkData.taken) {
+          const takenMsg = `Client ID "${cid}" is already used on central. Choose a different ID.`;
+          if (feedback) {
+            feedback.textContent = takenMsg;
+            feedback.className = "small mt-2 text-danger";
+          }
+          if (centralFeedback) {
+            centralFeedback.textContent = "Client ID already taken on central.";
+            centralFeedback.className = "small mt-1 text-danger";
+          }
+          return;
+        }
+      }
+
       if (feedback) {
         feedback.textContent = "Saving…";
         feedback.className = "small mt-2 text-muted";
@@ -539,15 +682,50 @@ function initClientIdSettingsModal() {
           central_api_url: centralParsed.url,
         }),
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
+      let data = await res.json().catch(() => ({}));
+      // Defensive fallback: older backend builds may still enforce markup_percent
+      // when saving Client ID only. Retry once with current margin value included.
+      if (!res.ok && /Margin percentage must be between 0 and 99\.99/i.test(String(data?.message || ""))) {
+        const markupInput = document.getElementById("settings-markup-percent");
+        const markupValue = parseFloat(markupInput?.value);
+        const retryRes = await fetch(SETTINGS_API, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+          body: JSON.stringify({
+            client_id: cid,
+            central_api_url: centralParsed.url,
+            markup_percent: Number.isFinite(markupValue) ? markupValue : 10,
+          }),
+        });
+        data = await retryRes.json().catch(() => ({}));
+        if (!retryRes.ok) {
+          const msg = data.message || "Failed to update settings.";
+          if (feedback) {
+            feedback.textContent = msg;
+            feedback.className = "small mt-2 text-danger";
+          }
+          const appAlert = document.getElementById("app-settings-alert");
+          if (appAlert) {
+            appAlert.textContent = msg;
+            appAlert.className = "alert alert-danger py-1 small";
+            appAlert.classList.remove("d-none");
+          }
+          return;
+        }
+      } else if (!res.ok) {
+        const msg = data.message || "Failed to update settings.";
         if (feedback) {
-          feedback.textContent = data.message || "Failed to update Client ID.";
+          feedback.textContent = msg;
           feedback.className = "small mt-2 text-danger";
         }
-        if (centralFeedback && data && data.message) {
-          centralFeedback.textContent = data.message;
-          centralFeedback.className = "small mt-1 text-danger";
+        // Do not mirror the same server message into central-url-feedback: that
+        // field is only for address/connection issues; unrelated API errors
+        // (e.g. margin validation) looked like they belonged to central sync.
+        const appAlert = document.getElementById("app-settings-alert");
+        if (appAlert) {
+          appAlert.textContent = msg;
+          appAlert.className = "alert alert-danger py-1 small";
+          appAlert.classList.remove("d-none");
         }
         return;
       }
@@ -561,10 +739,11 @@ function initClientIdSettingsModal() {
       } catch (_) {
         // Ignore local storage failures; server-side Client ID is still saved.
       }
-      const appAlert = document.getElementById("app-settings-alert");
-      if (appAlert) {
-        appAlert.textContent = "App settings saved.";
-        appAlert.className = "alert alert-success py-1 small";
+      const appAlertOk = document.getElementById("app-settings-alert");
+      if (appAlertOk) {
+        appAlertOk.textContent = "App settings saved.";
+        appAlertOk.className = "alert alert-success py-1 small";
+        appAlertOk.classList.remove("d-none");
       }
       if (centralFeedback && data && typeof data.central_api_url === "string") {
         setCentralAddressUIFromUrl(data.central_api_url);
@@ -681,6 +860,83 @@ function initClientIdSettingsModal() {
 const navUserName = document.getElementById("nav-user-name");
 
 let syncStatusTimer = null;
+let lastCentralReachable = null;
+const CENTRAL_AVAILABLE_PROMPT_PREFIX = "sm_central_available_prompted:";
+
+function normalizeCentralBrowserUrl(rawUrl) {
+  const s = String(rawUrl || "").trim();
+  if (!s) return "";
+  try {
+    const u = new URL(s);
+    return u.toString().replace(/\/+$/, "");
+  } catch {
+    return "";
+  }
+}
+
+function showCentralAvailablePrompt(centralUrl) {
+  const safeUrl = normalizeCentralBrowserUrl(centralUrl);
+  if (!safeUrl) return;
+
+  const promptKey = `${CENTRAL_AVAILABLE_PROMPT_PREFIX}${safeUrl}`;
+  try {
+    if (sessionStorage.getItem(promptKey) === "1") return;
+  } catch (_) {}
+
+  const existing = document.getElementById("central-available-toast");
+  if (existing) existing.remove();
+
+  const toast = document.createElement("div");
+  toast.id = "central-available-toast";
+  toast.className = "alert alert-info shadow-sm";
+  toast.style.position = "fixed";
+  toast.style.top = "10px";
+  toast.style.right = "10px";
+  toast.style.zIndex = "1065";
+  toast.style.maxWidth = "360px";
+  toast.style.padding = "10px 12px";
+  toast.innerHTML = `
+    <div class="d-flex align-items-start gap-2">
+      <i class="bi bi-cloud-check fs-5 mt-1"></i>
+      <div class="flex-grow-1">
+        <div class="fw-semibold small">Central server is available.</div>
+        <div class="small text-muted mb-2">Open central now for faster setup?</div>
+        <div class="d-flex gap-2">
+          <button type="button" class="btn btn-primary btn-sm" id="btn-open-central-now">Open central</button>
+          <button type="button" class="btn btn-outline-secondary btn-sm" id="btn-open-central-later">Later</button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(toast);
+
+  const closeToast = () => {
+    toast.remove();
+  };
+
+  const markPrompted = () => {
+    try {
+      sessionStorage.setItem(promptKey, "1");
+    } catch (_) {}
+  };
+
+  toast.querySelector("#btn-open-central-now")?.addEventListener("click", () => {
+    markPrompted();
+    closeToast();
+    window.open(safeUrl, "_blank", "noopener,noreferrer");
+  });
+
+  toast.querySelector("#btn-open-central-later")?.addEventListener("click", () => {
+    markPrompted();
+    closeToast();
+  });
+
+  setTimeout(() => {
+    if (document.body.contains(toast)) {
+      closeToast();
+    }
+  }, 15000);
+}
 
 async function fetchAndRenderSyncStatus() {
   const wrap = document.getElementById("nav-sync-indicator");
@@ -709,16 +965,23 @@ async function fetchAndRenderSyncStatus() {
       wrap.classList.add("sync-online");
       icon.className = "bi bi-cloud-check me-1";
       text.textContent = "Synced with central";
+      const shouldPromptCentralAvailable = lastCentralReachable !== true;
+      if (shouldPromptCentralAvailable) {
+        showCentralAvailablePrompt(data.centralUrl || "");
+      }
+      lastCentralReachable = true;
     } else {
       wrap.classList.add("sync-offline");
       icon.className = "bi bi-shield-check me-1";
       text.textContent = "Central offline – storing locally";
+      lastCentralReachable = false;
     }
   } catch {
     spinner.classList.add("d-none");
     wrap.classList.add("sync-offline");
     icon.className = "bi bi-shield-check me-1";
     text.textContent = "Central offline – storing locally";
+    lastCentralReachable = false;
   }
 }
 
@@ -1114,7 +1377,8 @@ window.addEventListener("DOMContentLoaded", () => {
   initGlobalSlashSearchShortcut();
 
   ensureAuthenticated()
-    .then(() => {
+    .then(async () => {
+      await seedUiPrefsFromServer();
       if (document.body?.dataset?.page === "overview") {
         loadDashboardOverview();
       }

@@ -82,6 +82,64 @@ function ensureIdempotencyKeys() {
   }
 }
 
+function applyBuildDefaults() {
+  const defaultsPath = path.join(__dirname, "..", "build-defaults.json");
+  if (!fs.existsSync(defaultsPath)) return;
+
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(defaultsPath, "utf8"));
+  } catch (_) {
+    return;
+  }
+
+  const s = parsed && parsed.settings ? parsed.settings : {};
+
+  const parseBool = (raw, defaultVal) => {
+    if (raw == null) return defaultVal;
+    if (typeof raw === "boolean") return raw;
+    const v = String(raw).trim().toLowerCase();
+    if (v === "1" || v === "true" || v === "yes" || v === "on") return true;
+    if (v === "0" || v === "false" || v === "no" || v === "off") return false;
+    return defaultVal;
+  };
+
+  const entries = [];
+
+  const markup = Number(s.markup_percent);
+  if (Number.isFinite(markup) && markup >= 0 && markup < 100) {
+    entries.push(["markup_percent", String(Math.round(markup * 100) / 100)]);
+  }
+
+  const clientId = typeof s.client_id === "string" ? s.client_id.trim() : "";
+  if (clientId) entries.push(["client_id", clientId.slice(0, 64)]);
+
+  const centralApiUrl = typeof s.central_api_url === "string" ? s.central_api_url.trim() : "";
+  if (centralApiUrl) entries.push(["central_api_url", centralApiUrl.slice(0, 255)]);
+
+  entries.push(["pref_allow_hotkeys", parseBool(s.pref_allow_hotkeys, true) ? "1" : "0"]);
+  entries.push(["pref_enable_modal_drag", parseBool(s.pref_enable_modal_drag, true) ? "1" : "0"]);
+
+  try {
+    const insertStmt = db.prepare(
+      "INSERT OR REPLACE INTO settings (setting_key, setting_value) VALUES (?, ?)"
+    );
+    for (const [k, v] of entries) {
+      insertStmt.run(k, v);
+    }
+
+    const markupEntry = entries.find(([k]) => k === "markup_percent");
+    if (markupEntry) {
+      const pct = parseFloat(markupEntry[1]);
+      if (Number.isFinite(pct) && pct >= 0 && pct < 100) {
+        db.prepare("UPDATE products SET selling_price = ROUND(supplier_price / (1 - ? / 100), 2)").run(pct);
+      }
+    }
+  } catch (_) {
+    // Ignore build defaults if something unexpected happens.
+  }
+}
+
 // Auto-initialize of schema
 const tableCount = db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE type='table'").get();
 if (tableCount.n === 0) {
@@ -92,6 +150,7 @@ if (tableCount.n === 0) {
   }
   ensureChangeLog();
   ensureIdempotencyKeys();
+  applyBuildDefaults();
 } else {
   try {
     db.exec("ALTER TABLE users ADD COLUMN allowed_pages TEXT");
@@ -122,6 +181,12 @@ if (tableCount.n === 0) {
     console.log("[db] Added column sales.customer_address");
   } catch (e) {
     if (e && !/duplicate column name/i.test(String(e.message))) console.warn("[db] Migration sales.customer_address:", e.message);
+  }
+  try {
+    db.exec("ALTER TABLE sales ADD COLUMN sale_uuid TEXT");
+    console.log("[db] Added column sales.sale_uuid");
+  } catch (e) {
+    if (e && !/duplicate column name/i.test(String(e.message))) console.warn("[db] Migration sales.sale_uuid:", e.message);
   }
   try {
     db.exec("UPDATE payments SET payment_method = reference_number WHERE payment_method IS NULL AND reference_number IN ('cash','gcash','paymaya')");

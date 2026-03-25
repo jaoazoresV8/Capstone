@@ -4,7 +4,6 @@
  */
 import { API_ORIGIN, ENABLE_SALE_OR_WEBSOCKET } from "./config.js";
 import {
-  enqueueSyncOperation,
   generateUuidV4,
   rememberSaleUuidMapping,
   refreshSaleOrNumbersNow,
@@ -1450,47 +1449,8 @@ function submitSale() {
         rememberSaleUuidMapping(saleData.id, saleData.sale_uuid, saleData.receipt_no || saleData.receipt_number || receiptNumber);
       }
 
-      // Queue sync operation to central (offline‑friendly).
-      try {
-        const itemsForSync = items.map((item) => {
-          const match = saleLineItems.find((i) => i.product_id === item.product_id) || {};
-          const price = match.price != null ? match.price : 0;
-          const subtotal = price * item.quantity;
-          return {
-            product_id: item.product_id,
-            quantity: item.quantity,
-            price,
-            subtotal,
-          };
-        });
-
-        enqueueSyncOperation({
-          entityType: "sale",
-          operation: "create",
-          entityId: saleData.id || null,
-          localId: null,
-          data: {
-            sale_uuid: saleData.sale_uuid,
-            receipt_no: saleData.receipt_no || saleData.receipt_number || receiptNumber,
-            terminal_id: saleData.terminal_id || getTerminalPrefix(),
-            customer_id: customerId || null,
-            customer_name: saleData.customer_name || customerName,
-            customer_contact: customerContactValue,
-            customer_address: addressTrimmedForPayload || undefined,
-            transaction_type: "walk-in",
-            total_amount: totalRounded,
-            amount_paid: effectiveAmountPaid,
-            remaining_balance: remainingBalance,
-            status,
-            sale_date: saleData.sale_date || new Date().toISOString(),
-            items: itemsForSync,
-            payment_method: paymentMethod,
-            reference_number: referenceNumber || undefined,
-          },
-        });
-      } catch (_) {
-        // If queuing fails, we still keep the local sale; sync can be retried later.
-      }
+      // Sale sync: backend logs to change_log; startCentralSyncWorker pushes to central.
+      // Do not enqueue the same sale here — duplicate pushes consumed two OR numbers from central.
 
       // If central is online and supports WebSockets, listen briefly for a real OR
       // update for this sale and update the receipt in real time when it arrives.
@@ -2533,14 +2493,25 @@ function renderSales(sales) {
       const totalAmount = Number(s.total_amount || 0);
       const amountPaid = Number(s.amount_paid || 0);
       const remaining = Number(s.remaining_balance || 0);
+      const saleStatusRaw = (s.status || "").toLowerCase();
       const issueResolution = (s.issue_resolution_status || "").toLowerCase();
-      let viewStatus = (s.status || "").toLowerCase();
-      if (remaining > 0 && amountPaid > 0) {
-        viewStatus = "partial";
-      } else if (remaining > 0 && amountPaid <= 0) {
-        viewStatus = "unpaid";
-      } else if (remaining <= 0 && amountPaid >= totalAmount) {
-        viewStatus = "paid";
+      // Terminal void/refund from issues row or from sales.status (central sync often updates status only).
+      const terminalStatus =
+        issueResolution === "voided" || issueResolution === "refunded"
+          ? issueResolution
+          : saleStatusRaw === "voided" || saleStatusRaw === "refunded"
+          ? saleStatusRaw
+          : "";
+
+      let viewStatus = saleStatusRaw;
+      if (!terminalStatus) {
+        if (remaining > 0 && amountPaid > 0) {
+          viewStatus = "partial";
+        } else if (remaining > 0 && amountPaid <= 0) {
+          viewStatus = "unpaid";
+        } else if (remaining <= 0 && amountPaid >= totalAmount) {
+          viewStatus = "paid";
+        }
       }
 
       const transactionType = s.transaction_type || "";
@@ -2553,9 +2524,9 @@ function renderSales(sales) {
 
       // Voided/refunded take precedence in badge; otherwise show payment status
       const statusBadgeClass =
-        issueResolution === "voided"
+        terminalStatus === "voided"
           ? "secondary"
-          : issueResolution === "refunded"
+          : terminalStatus === "refunded"
           ? "secondary"
           : viewStatus === "paid"
           ? "success"
@@ -2563,9 +2534,9 @@ function renderSales(sales) {
           ? "warning"
           : "secondary";
       const statusLabel =
-        issueResolution === "voided"
+        terminalStatus === "voided"
           ? "Voided"
-          : issueResolution === "refunded"
+          : terminalStatus === "refunded"
           ? "Refunded"
           : viewStatus || "";
 
@@ -2596,7 +2567,10 @@ function renderSales(sales) {
           : "";
 
       const isFlaggedOpen = issueState === "open";
-      const rowClasses = isFlaggedOpen ? "sale-issue-open" : "";
+      const isTerminalClosed = terminalStatus === "voided" || terminalStatus === "refunded";
+      const rowClasses = [isFlaggedOpen ? "sale-issue-open" : "", isTerminalClosed ? "text-decoration-line-through" : ""]
+        .filter(Boolean)
+        .join(" ");
       const rowAttrs = [
         `data-sale-id="${s.id}"`,
         issueState ? `data-issue-state="${issueState}"` : "",
@@ -3087,6 +3061,13 @@ window.addEventListener("pjax:complete", (e) => {
     setTimeout(() => {
       loadSales({});
     }, 100);
+  }
+});
+
+// Keep Sales page aligned with central/client sync refresh triggers.
+window.addEventListener("central:refresh", () => {
+  if (document.body?.dataset.page === "sales") {
+    loadSales({});
   }
 });
 

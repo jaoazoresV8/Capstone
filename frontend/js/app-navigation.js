@@ -1,5 +1,6 @@
 
 (function () {
+  var PREF_ALLOW_HOTKEYS_KEY = "sm_pref_allow_hotkeys";
   var PAGES = {
     "dashboard.html": "overview",
     "products.html": "products",
@@ -93,6 +94,7 @@
         var main = document.querySelector("main");
         if (newMain && main) {
           main.innerHTML = newMain.innerHTML;
+          syncNavHeightVar();
           if (newTitle) document.title = newTitle.textContent;
           var page = PAGES[pageFile];
           if (page) {
@@ -107,10 +109,7 @@
             }, 50);
           }
           if (push !== false) history.pushState({ pjax: true, url: url, page: page }, "", url);
-          // Reset scroll (window + fixed .app-main) so navbar is fully visible
-          if (document.documentElement) document.documentElement.scrollTop = 0;
-          if (document.body) document.body.scrollTop = 0;
-          if (main) main.scrollTop = 0;
+          restorePageUiAfterRefresh();
         }
       })
       .catch(function () { window.location.href = url; });
@@ -148,9 +147,42 @@
     }
   });
 
+  function syncNavHeightVar() {
+    try {
+      var nav = document.querySelector(".app-navbar");
+      if (!nav || !document.documentElement || !document.documentElement.style) return;
+      var h = Math.ceil(nav.getBoundingClientRect().height || nav.offsetHeight || 60);
+      if (h > 0) {
+        document.documentElement.style.setProperty("--dm-nav-height", h + "px");
+        var main = document.querySelector(".app-main");
+        if (main && main.style) {
+          main.style.paddingTop = (h + 24) + "px";
+        }
+      }
+    } catch (_) {}
+  }
+
+  function restorePageUiAfterRefresh() {
+    try {
+      if (document.body) {
+        document.body.classList.remove("page-loading");
+      }
+      syncNavHeightVar();
+      if (typeof history !== "undefined" && history.scrollRestoration) {
+        history.scrollRestoration = "manual";
+      }
+      window.scrollTo(0, 0);
+      if (document.documentElement) document.documentElement.scrollTop = 0;
+      if (document.body) document.body.scrollTop = 0;
+      var m = document.querySelector(".app-main");
+      if (m) m.scrollTop = 0;
+    } catch (_) {}
+  }
+
   function ensureGlobalScripts() {
     ensureModalDraggable();
     ensureViewToggle();
+    syncNavHeightVar();
   }
 
   // Treat browser refresh same as nav refresh: reset scroll to top (window + fixed .app-main).
@@ -169,6 +201,8 @@
 
   window.addEventListener("pageshow", function (e) {
     if (e.persisted) applyRefreshScrollBehavior();
+    syncNavHeightVar();
+    requestAnimationFrame(restorePageUiAfterRefresh);
   });
 
   // Disable browser refresh via keyboard (F5, Ctrl+R, Cmd+R)
@@ -178,15 +212,170 @@
     }
   });
 
+  function isEditableTarget(target) {
+    if (!target) return false;
+    try {
+      var tag = (target.tagName || "").toLowerCase();
+      if (tag === "input" || tag === "textarea" || tag === "select") return true;
+      if (target.isContentEditable) return true;
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  function goToPage(pageId) {
+    if (!pageId || !document.body) return;
+    if (document.body.dataset.page === pageId) return;
+    var link = document.querySelector('[data-page-link="' + pageId + '"]');
+    if (!link) return;
+    var href = link.getAttribute("href");
+    if (!href) return;
+    loadPage(href, true);
+  }
+
+  function focusAndSelectIfInput(el) {
+    if (!el) return;
+    try {
+      el.focus();
+      if (el.select && el.type === "text") {
+        el.select();
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  function handleGlobalShortcut(e) {
+    try {
+      var hotkeysRaw = localStorage.getItem(PREF_ALLOW_HOTKEYS_KEY);
+      var allowHotkeys = hotkeysRaw == null ? true : hotkeysRaw === "1";
+      if (!allowHotkeys) return false;
+    } catch (_) {
+      // If localStorage fails, keep hotkeys enabled.
+    }
+
+    var isElectron =
+      document && document.documentElement && document.documentElement.classList
+        ? document.documentElement.classList.contains("is-electron")
+        : false;
+    if (!isElectron) {
+      try {
+        isElectron = /electron/i.test((navigator && navigator.userAgent) || "");
+      } catch (_) {
+        isElectron = false;
+      }
+    }
+
+    // In normal browsers, Alt+1..7 is commonly intercepted by the browser UI (tab shortcuts, etc.)
+    // so we switch to Ctrl+Alt+1..7 to avoid double-actions in web mode.
+    if (isElectron ? (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) : (e.altKey && e.ctrlKey && !e.metaKey && !e.shiftKey)) {
+      if (isEditableTarget(e.target)) return false;
+      var key = e.key;
+      switch (key) {
+        case "1":
+          goToPage("overview");
+          break;
+        case "2":
+          goToPage("products");
+          break;
+        case "3":
+          goToPage("customers");
+          break;
+        case "4":
+          goToPage("sales");
+          break;
+        case "5":
+          goToPage("payments");
+          break;
+        case "6":
+          goToPage("reports");
+          break;
+        case "7":
+          goToPage("users");
+          break;
+        case "r":
+        case "R":
+          var refreshBtn = document.getElementById("nav-refresh-btn");
+          if (refreshBtn) refreshBtn.click();
+          break;
+        default:
+          return false;
+      }
+      e.preventDefault();
+      return true;
+    }
+
+    if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey) {
+      if (isEditableTarget(e.target)) return false;
+      var page = (document.body && document.body.dataset && document.body.dataset.page) || "";
+      var k = (e.key || "").toLowerCase();
+
+      if (k === "n") {
+        if (page === "products") {
+          var addProductBtn = document.getElementById("btn-add-product");
+          if (addProductBtn) addProductBtn.click();
+        } else if (page === "sales") {
+          var newSaleBtn = document.getElementById("btn-new-sale");
+          if (newSaleBtn) newSaleBtn.click();
+        } else if (page === "users") {
+          var addUserBtn = document.getElementById("add-user-btn");
+          if (addUserBtn) addUserBtn.click();
+        }
+        e.preventDefault();
+        return true;
+      }
+
+      if (k === "f") {
+        if (page === "products") {
+          focusAndSelectIfInput(document.getElementById("product-search-filter"));
+        } else if (page === "customers") {
+          focusAndSelectIfInput(document.getElementById("customer-search"));
+        } else if (page === "sales") {
+          focusAndSelectIfInput(document.getElementById("sales-search"));
+        } else if (page === "payments") {
+          focusAndSelectIfInput(document.getElementById("payments-search"));
+        }
+        e.preventDefault();
+        return true;
+      }
+
+      if (k === "r" && page === "reports") {
+        var reportsRefreshBtn = document.getElementById("btn-refresh-reports");
+        if (reportsRefreshBtn) reportsRefreshBtn.click();
+        e.preventDefault();
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  document.addEventListener(
+    "keydown",
+    function (e) {
+      try {
+        handleGlobalShortcut(e);
+      } catch {
+        // ignore
+      }
+    },
+    false
+  );
+
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", function () {
       ensureGlobalScripts();
-      applyRefreshScrollBehavior();
-      requestAnimationFrame(applyRefreshScrollBehavior);
+      restorePageUiAfterRefresh();
+      requestAnimationFrame(restorePageUiAfterRefresh);
+      requestAnimationFrame(syncNavHeightVar);
     });
   } else {
     ensureGlobalScripts();
-    applyRefreshScrollBehavior();
-    requestAnimationFrame(applyRefreshScrollBehavior);
+    restorePageUiAfterRefresh();
+    requestAnimationFrame(restorePageUiAfterRefresh);
+    requestAnimationFrame(syncNavHeightVar);
   }
+
+  window.addEventListener("resize", syncNavHeightVar);
 })();

@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS sales (
   customer_contact TEXT,
   customer_address TEXT,
   or_number TEXT,
+  sale_uuid TEXT,
   total_amount REAL NOT NULL DEFAULT 0,
   amount_paid REAL NOT NULL DEFAULT 0,
   remaining_balance REAL NOT NULL DEFAULT 0,
