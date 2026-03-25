@@ -18,6 +18,7 @@ import settingsRouter from "./routes/settingsRoutes.js";
 import reportRouter from "./routes/reportRoutes.js";
 import { createCentralProxy } from "./middleware/centralProxy.js";
 import pool from "./db.js";
+import { pushPendingChangesToCentralOnce } from "./centralSyncPushOnce.js";
 import { createIdempotencyMiddleware } from "./middleware/idempotency.js";
 import { authenticateToken } from "./middleware/authMiddleware.js";
 
@@ -551,109 +552,8 @@ app.get("/api/sync/pulled-state", authenticateToken, async (req, res) => {
 function startCentralSyncWorker() {
   const INTERVAL_MS = 7000;
 
-  let pushErrorLogged = false;
-
   const tick = async () => {
-    let hadError = false;
-    try {
-      const centralUrl = await getCentralBaseUrl();
-      if (!centralUrl) {
-        pushErrorLogged = false;
-        return;
-      }
-      const [rows] = await pool.query(
-        "SELECT setting_value FROM settings WHERE setting_key = 'central_last_pushed_change_id'"
-      );
-      const lastId = rows && rows.length ? Number(rows[0].setting_value) || 0 : 0;
-
-      const [changes] = await pool.query(
-        "SELECT id, entity_type, entity_id, operation, payload, created_at FROM change_log WHERE id > ? ORDER BY id ASC LIMIT 100",
-        [lastId]
-      );
-      if (!changes || changes.length === 0) return;
-
-      const operations = changes.map((c) => ({
-        localId: c.id,
-        entityType: c.entity_type,
-        entityId: c.entity_id,
-        operation: c.operation,
-        data: (() => {
-          try {
-            return c.payload ? JSON.parse(c.payload) : {};
-          } catch {
-            return { raw: String(c.payload || "") };
-          }
-        })(),
-      }));
-
-      const clientId = await getClientIdSetting();
-      const body = {
-        clientId,
-        operations,
-      };
-
-      const resp = await fetch(`${centralUrl}/api/sync/push`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-
-      if (!resp.ok) {
-        const text = await resp.text().catch(() => "");
-        if (CENTRAL_SYNC_DEBUG) {
-          console.error("[CentralSync] push failed:", resp.status, text.slice(0, 200));
-        }
-        return;
-      }
-
-      const pushResult = await resp.json().catch(() => null);
-      const appliedLocalIds = Array.isArray(pushResult?.applied)
-        ? pushResult.applied
-            .map((a) => Number(a?.localId))
-            .filter((id) => Number.isFinite(id) && id > 0)
-        : [];
-      const failedCount = Array.isArray(pushResult?.failed) ? pushResult.failed.length : 0;
-
-      // Advance only for operations central explicitly applied.
-      // This prevents skipping failed sale pushes (they must be retried).
-      let maxId = lastId;
-      if (appliedLocalIds.length > 0) {
-        maxId = Math.max(...appliedLocalIds);
-      } else if (!pushResult || (pushResult?.success === true && failedCount === 0)) {
-        // Backward-compatible fallback for older central servers without applied[] details.
-        maxId = changes[changes.length - 1].id;
-      } else {
-        if (CENTRAL_SYNC_DEBUG) {
-          console.warn(
-            "[CentralSync] push returned no applied operations; keeping last pushed id at",
-            lastId
-          );
-        }
-        return;
-      }
-      await pool.query(
-        "INSERT INTO settings (setting_key, setting_value) VALUES ('central_last_pushed_change_id', ?) ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value",
-        [String(maxId)]
-      );
-
-      if (CENTRAL_SYNC_DEBUG) {
-        console.log(
-          `[CentralSync] pushed batch=${changes.length}, applied=${appliedLocalIds.length || "unknown"}, failed=${failedCount}, now at id ${maxId}`
-        );
-      }
-    } catch (e) {
-      hadError = true;
-      if (!pushErrorLogged) {
-        if (CENTRAL_SYNC_DEBUG) {
-          console.error("[CentralSync] error during push:", e?.message || e);
-        }
-        pushErrorLogged = true;
-      }
-    } finally {
-      if (!hadError) {
-        pushErrorLogged = false;
-      }
-    }
+    await pushPendingChangesToCentralOnce();
   };
 
   setInterval(tick, INTERVAL_MS);

@@ -3,8 +3,13 @@ import bcrypt from "bcryptjs";
 import pool, { getTableColumns } from "../db.js";
 import { authenticateToken, requireAdmin } from "../middleware/authMiddleware.js";
 import { logChange } from "../changeLog.js";
+import { pushPendingChangesToCentralOnce } from "../centralSyncPushOnce.js";
 
 const router = express.Router();
+
+function scheduleCentralPush() {
+  void pushPendingChangesToCentralOnce();
+}
 router.use(authenticateToken);
 
 // Helper: check if local sale_issues table exists (offline flagging support)
@@ -737,6 +742,7 @@ router.post("/:id/issues", async (req, res) => {
     // Log for central sync (entity_type 'sale_issue')
     await logChange("sale_issue", issue.issue_id, "create", issue);
 
+    scheduleCentralPush();
     return res.status(201).json({ issue });
   } catch (err) {
     console.error("POST /api/sales/:id/issues:", err);
@@ -857,6 +863,7 @@ router.put("/:id/issues/:issueId", requireAdmin, async (req, res) => {
     const issue = rows[0];
     await logChange("sale_issue", issue.issue_id, "update", issue);
 
+    scheduleCentralPush();
     return res.json({ issue });
   } catch (err) {
     console.error("PUT /api/sales/:id/issues/:issueId:", err);
@@ -973,6 +980,7 @@ router.put("/:id/restore-status", async (req, res) => {
       });
     }
 
+    scheduleCentralPush();
     return res.json({ message: `Sale restored to ${desiredStatus}.` });
   } catch (err) {
     console.error("PUT /api/sales/:id/restore-status:", err);

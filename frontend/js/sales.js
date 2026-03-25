@@ -7,6 +7,8 @@ import {
   generateUuidV4,
   rememberSaleUuidMapping,
   refreshSaleOrNumbersNow,
+  enqueueSyncOperation,
+  flushSyncQueue,
 } from "./sync-queue.js";
 const SALES_API = `${API_ORIGIN}/api/sales`;
 const CUSTOMERS_API = `${API_ORIGIN}/api/customers`;
@@ -28,6 +30,36 @@ function getToken() {
 function authHeaders() {
   const token = getToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+// Best-effort fast path: push sale issue changes to central immediately
+// after local save, instead of waiting for background sync cadence.
+async function pushSaleIssueSyncNow(issue, operation = "update") {
+  const payload = issue && typeof issue === "object" ? issue : null;
+  const issueId = Number(payload?.issue_id || payload?.id || 0);
+  const saleId = Number(payload?.sale_id || 0);
+  if (!payload || !issueId || !saleId) return;
+  try {
+    const status = String(payload.status || "").toLowerCase();
+    // Push sale status first so central shows void/refund even if sale_issue upsert fails.
+    if (status === "voided" || status === "refunded") {
+      enqueueSyncOperation({
+        entityType: "sale",
+        entityId: saleId,
+        operation: "update",
+        data: { sale_id: saleId, status },
+      });
+    }
+    enqueueSyncOperation({
+      entityType: "sale_issue",
+      entityId: issueId,
+      operation: operation === "create" ? "create" : "update",
+      data: payload,
+    });
+    await flushSyncQueue();
+  } catch (_) {
+    // Keep UX non-blocking if central is temporarily unavailable.
+  }
 }
 
 function escapeHtml(s) {
@@ -2759,6 +2791,8 @@ async function submitFlagIssue() {
       return;
     }
 
+    await pushSaleIssueSyncNow(data?.issue, "create");
+
     // Mark this sale as having an open issue in memory and turn flag red
     allSales = allSales.map((s) =>
       String(s.id) === String(saleId)
@@ -3046,6 +3080,8 @@ async function submitIssueResolution() {
       }
       return;
     }
+
+    await pushSaleIssueSyncNow(data?.issue, "update");
 
     // Once resolved, clear open flag for this sale and turn flag green
     allSales = allSales.map((s) =>

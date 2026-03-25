@@ -2,6 +2,7 @@
  * Customers page: list customers with search and filter functionality
  */
 import { API_ORIGIN } from "./config.js";
+import { enqueueSyncOperation, flushSyncQueue } from "./sync-queue.js";
 const CUSTOMERS_API = `${API_ORIGIN}/api/customers`;
 const CUSTOMER_REMIND_BALANCE_BULK_API = `${CUSTOMERS_API}/remind-balance-bulk`;
 
@@ -31,6 +32,31 @@ let notifyAllPhoneOnlyCursor = 0;
 
 const SALES_API = `${API_ORIGIN}/api/sales`;
 const ADMIN_VERIFY_API = `${API_ORIGIN}/api/auth/admin/verify-password`;
+
+async function pushSaleIssueSyncNow(issue, operation = "update") {
+  const payload = issue && typeof issue === "object" ? issue : null;
+  const issueId = Number(payload?.issue_id || payload?.id || 0);
+  const saleId = Number(payload?.sale_id || 0);
+  if (!payload || !issueId || !saleId) return;
+  try {
+    const status = String(payload.status || "").toLowerCase();
+    if (status === "voided" || status === "refunded") {
+      enqueueSyncOperation({
+        entityType: "sale",
+        entityId: saleId,
+        operation: "update",
+        data: { sale_id: saleId, status },
+      });
+    }
+    enqueueSyncOperation({
+      entityType: "sale_issue",
+      entityId: issueId,
+      operation: operation === "create" ? "create" : "update",
+      data: payload,
+    });
+    await flushSyncQueue();
+  } catch (_) {}
+}
 
 function normalizePhoneInput(val) {
   const digits = String(val || "").replace(/\\D/g, "");
@@ -274,6 +300,7 @@ async function ensureAndResolveIssueForSale(saleId, kind) {
     if (!res.ok) {
       return { ok: false, message: data.message || "Failed to update sale issue." };
     }
+    await pushSaleIssueSyncNow(data?.issue, "update");
     return { ok: true, message: `Sale #${saleId} marked as ${status}.` };
   } catch (err) {
     return { ok: false, message: err.message || "Failed to update sale issue." };
@@ -373,12 +400,8 @@ function effectiveCustomerTransactionStatus(t) {
   return st;
 }
 
-/** Customers table Status column: balance first, then any void/refund in history, else Paid. */
+/** Customers table Status column: void/refund first, then balance, else Paid. */
 function customerListStatusMeta(c) {
-  const balanceRounded = Math.round(Number(c.total_balance || 0) * 100) / 100;
-  if (balanceRounded > 0) {
-    return { label: "With balance", className: "text-danger fw-medium" };
-  }
   const txs = c.transactions || [];
   let hasVoid = false;
   let hasRefund = false;
@@ -392,6 +415,10 @@ function customerListStatusMeta(c) {
   }
   if (hasVoid) return { label: "Void", className: "text-secondary fw-medium" };
   if (hasRefund) return { label: "Refunded", className: "text-info fw-medium" };
+  const balanceRounded = Math.round(Number(c.total_balance || 0) * 100) / 100;
+  if (balanceRounded > 0) {
+    return { label: "With balance", className: "text-danger fw-medium" };
+  }
   return { label: "Paid", className: "text-success" };
 }
 

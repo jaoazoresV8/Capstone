@@ -194,6 +194,8 @@ export async function flushSyncQueue() {
         break;
       }
 
+      const failedCount = Array.isArray(data?.failed) ? data.failed.length : 0;
+
       // On success, drop only operations that central confirms as applied.
       // This prevents one bad operation from permanently blocking the queue.
       const appliedLocalIds = new Set(
@@ -205,17 +207,18 @@ export async function flushSyncQueue() {
       );
       if (appliedLocalIds.size > 0) {
         queue = queue.filter((op) => !appliedLocalIds.has(String(op?.localId || "")));
-      } else {
-        // Backward compatibility for older central responses.
+      } else if (failedCount === 0) {
+        // Backward compatibility: older central servers with no applied[] but HTTP 200.
         queue = queue.slice(batch.length);
-      }
-      saveQueue(queue);
-
-      // If nothing from this batch was applied, avoid a tight loop.
-      if (appliedLocalIds.size === 0) {
-        console.warn("Sync push returned no applied operations; keeping queue for retry.");
+      } else {
+        // Central reported failures and nothing applied — keep queue for retry (do not drop).
+        console.warn(
+          "Sync push had failures; keeping queue for retry.",
+          data.failed?.length || failedCount
+        );
         break;
       }
+      saveQueue(queue);
     }
 
     // If we flushed everything, resolve receipt_no -> central OR number and update local sales.

@@ -1,11 +1,11 @@
 {
-  "generated_at": "2026-03-24T13:58:10.339Z",
+  "generated_at": "2026-03-25T22:59:58.494Z",
   "settings": {
-    "markup_percent": 10,
-    "client_id": "DESKTOP-1DJTVFU",
-    "central_api_url": "",
-    "pref_allow_hotkeys": true,
-    "pref_enable_modal_drag": true
+    "markup_percent": 90,
+    "client_id": "DESKTOP-1DJTVF0",
+    "central_api_url": "http://192.168.1.5:5000",
+    "pref_allow_hotkeys": false,
+    "pref_enable_modal_drag": false
   },
   "version": 1
 }
